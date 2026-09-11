@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>Claude Deck</title>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand"><span class="logo">✳</span><span>Claude Deck</span></div>
+      <button id="btn-new" class="btn-new">＋ 새 세션 <kbd>Ctrl+Shift+T</kbd></button>
+      <nav id="tabs"></nav>
+      <section class="side-section">
+        <div class="side-title">빠른 실행</div>
+        <div id="favorites"></div>
+      </section>
+      <footer class="side-footer">
+        <button id="btn-hosts">🖥 서버 관리</button>
+        <button id="btn-settings">⚙ 설정</button>
+      </footer>
+    </aside>
+
+    <main id="main">
+      <header id="topbar">
+        <div id="tb-info">
+          <span id="tb-name"></span>
+          <span id="tb-path"></span>
+        </div>
+        <div class="tb-actions">
+          <button id="btn-restart" title="세션 다시 시작">↻ 재시작</button>
+          <button id="btn-files" title="파일 패널 (Ctrl+Shift+E)">📁 파일</button>
+        </div>
+      </header>
+      <div id="terms"></div>
+      <div id="empty">
+        <div class="empty-card">
+          <div class="empty-logo">✳</div>
+          <h1>Claude Deck</h1>
+          <p>로컬이든 서버든, 폴더를 고르면 바로 Claude가 뜹니다.</p>
+          <button id="btn-new-empty" class="primary big">＋ 새 세션 시작</button>
+          <ul class="hints">
+            <li><kbd>Ctrl+Shift+T</kbd> 새 세션</li>
+            <li><kbd>Ctrl+1…9</kbd> / <kbd>Ctrl+Tab</kbd> 탭 이동</li>
+            <li><kbd>Ctrl+Shift+E</kbd> 파일 패널</li>
+            <li><kbd>Ctrl+V</kbd> 이미지 붙여넣기 (원격이면 자동 업로드)</li>
+            <li>터미널에 뜬 파일 경로를 클릭하면 바로 열립니다</li>
+          </ul>
+        </div>
+      </div>
+    </main>
+
+    <aside id="filepanel" hidden>
+      <div class="fp-head">
+        <div class="fp-tabs">
+          <button data-mode="recent">최근 변경</button>
+          <button data-mode="browse">탐색기</button>
+        </div>
+        <button id="fp-refresh" title="새로고침">↻</button>
+      </div>
+      <div id="fp-path"></div>
+      <div id="fp-list"></div>
+    </aside>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="menu-root"></div>
+  <div id="toasts"></div>
+
+  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="../node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"></script>
+  <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <script src="../node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
+  <script src="../node_modules/marked/lib/marked.umd.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
