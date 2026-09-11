@@ -24,7 +24,7 @@ const DEFAULT_CONFIG = {
   tabs: [],
   activeTab: null,
   knownHosts: {},
-  settings: { fontSize: 14, localShell: 'auto', notify: true },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'] },
 };
 let config = structuredClone(DEFAULT_CONFIG);
 const configPath = () => path.join(app.getPath('userData'), 'config.json');
@@ -745,6 +745,7 @@ function createWindow() {
     minHeight: 500,
     backgroundColor: '#131418',
     title: 'Claude Deck',
+    icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -789,6 +790,9 @@ function createWindow() {
     }
   });
 }
+
+// self-test: run an isolated instance next to the real one
+if (process.env.DECK_USERDATA) app.setPath('userData', process.env.DECK_USERDATA);
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();

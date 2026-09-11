@@ -34,7 +34,7 @@ const state = {
   hosts: [],
   tabs: [],
   activeId: null,
-  settings: { fontSize: 14, localShell: 'auto', notify: true },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'] },
   favorites: [],
   recentPaths: {},
   filePanel: { open: false, mode: 'recent' },
@@ -43,14 +43,11 @@ const tabById = (id) => state.tabs.find((t) => t.id === id);
 const activeTab = () => tabById(state.activeId);
 const hostById = (id) => state.hosts.find((x) => x.id === id) || { id, name: id.replace(/^\w+:/, ''), kind: 'ssh' };
 const isRemote = (tab) => tab.hostId !== 'local';
-const isClaudeCmd = (cmd) => /^claude\b/.test(cmd || '');
 
-const COMMANDS = [
-  { value: 'claude', label: 'claude · 새 대화' },
-  { value: 'claude --continue', label: 'claude --continue · 마지막 대화 이어서' },
-  { value: 'claude --resume', label: 'claude --resume · 대화 골라서 재개' },
-  { value: '', label: '셸만 열기' },
-  { value: '__custom', label: '직접 입력…' },
+const MODES = [
+  { flag: '', label: '새 대화' },
+  { flag: '--continue', label: '마지막 대화 이어서 (--continue)' },
+  { flag: '--resume', label: '대화 골라서 재개 (--resume)' },
 ];
 
 const THEME = {
@@ -66,15 +63,25 @@ const THEME = {
 };
 const FONT = '"Cascadia Mono", "D2Coding", Consolas, "Malgun Gothic", monospace';
 
-// stripped continue/resume flags → "claude --continue ..."
-function continueCommand(cmd) {
-  // a pinned session id resumes exactly that conversation, not just the latest one in the folder
-  if (/--resume\s+[0-9a-f-]{36}/.test(cmd)) return cmd;
-  const rest = cmd.replace(/^claude\b/, '').replace(/\s(--continue|--resume|-c|-r)\b(\s+[0-9a-f-]{36})?/g, '');
-  return `claude --continue${rest}`;
+// A tab runs either an agent program (claude, claude-glm, ...) followed by flags, or an arbitrary command.
+const programs = () => (state.settings.programs?.length ? state.settings.programs : ['claude']);
+const FLAG_RE = /\s(--continue|--resume|-c|-r)\b(\s+[0-9a-f-]{36})?/g;
+function inferProgram(cmd) {
+  if (!cmd) return null;
+  const known = [...new Set([...programs(), 'claude'])].sort((a, b) => b.length - a.length);
+  return known.find((p) => cmd === p || cmd.startsWith(p + ' ')) || null;
 }
-function freshCommand(cmd) {
-  return 'claude' + cmd.replace(/^claude\b/, '').replace(/\s(--continue|--resume|-c|-r)\b(\s+[0-9a-f-]{36})?/g, '');
+const isAgent = (tab) => !!tab.program && (tab.command === tab.program || tab.command.startsWith(tab.program + ' '));
+// same program and args, re-flagged with --continue; a pinned "--resume <id>" is kept so the exact conversation reopens
+function continueCommand(tab) {
+  if (!isAgent(tab)) return tab.command;
+  const rest = tab.command.slice(tab.program.length);
+  if (/--resume\s+[0-9a-f-]{36}/.test(rest)) return tab.command;
+  return `${tab.program} --continue${rest.replace(FLAG_RE, '')}`;
+}
+function freshCommand(tab) {
+  if (!isAgent(tab)) return tab.command;
+  return tab.program + tab.command.slice(tab.program.length).replace(FLAG_RE, '');
 }
 
 // ───────────────────────── terminal tabs ─────────────────────────
@@ -94,6 +101,7 @@ function createTab(opts, { activate: doActivate = true } = {}) {
     hostId: opts.hostId,
     cwd: opts.cwd || '~',
     command: opts.command ?? 'claude',
+    program: opts.program !== undefined ? opts.program : inferProgram(opts.command ?? 'claude'),
     status: 'new',
     title: '',
     attention: false,
@@ -269,7 +277,7 @@ async function closeTab(tab, { confirm = true } = {}) {
 
 function persistTabs() {
   deck.setConfig({
-    tabs: state.tabs.map((t) => ({ id: t.id, name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command })),
+    tabs: state.tabs.map((t) => ({ id: t.id, name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program })),
   });
 }
 
@@ -286,7 +294,7 @@ function flagAttention(tab, reason) {
 // ── overlay for paused / exited / error tabs
 function showOverlay(tab) {
   hideOverlay(tab);
-  const claude = isClaudeCmd(tab.command);
+  const claude = isAgent(tab);
   const msg = {
     paused: '<b>이전 세션</b> · 다시 열까요?',
     exited: '<b>세션 종료됨</b>',
@@ -294,8 +302,8 @@ function showOverlay(tab) {
   }[tab.status] || '';
   const btns = [];
   if (claude) {
-    btns.push(h('button', { class: 'primary', onclick: () => restartTab(tab, continueCommand(tab.command)) }, '이어서 시작'));
-    btns.push(h('button', { class: 'btn', onclick: () => restartTab(tab, freshCommand(tab.command)) }, '새 대화로 시작'));
+    btns.push(h('button', { class: 'primary', onclick: () => restartTab(tab, continueCommand(tab)) }, '이어서 시작'));
+    btns.push(h('button', { class: 'btn', onclick: () => restartTab(tab, freshCommand(tab)) }, '새 대화로 시작'));
   } else {
     btns.push(h('button', { class: 'primary', onclick: () => restartTab(tab) }, '다시 시작'));
   }
@@ -590,7 +598,7 @@ function renderTabs() {
         h('span', { class: 'dot' }),
         h('div', { class: 'tab-text' },
           h('div', { class: 'tab-name' }, t.name),
-          h('div', { class: 'tab-sub' }, t.title && t.status === 'running' ? t.title : shortPath(t.cwd))),
+          h('div', { class: 'tab-sub' }, t.program && t.program !== 'claude' ? h('span', { class: 'prog-tag' }, t.program + ' · ') : null, t.title && t.status === 'running' ? t.title : shortPath(t.cwd))),
         idx < 9 ? h('span', { class: 'tab-key' }, `^${idx + 1}`) : null,
         h('button', {
           class: 'tab-more',
@@ -633,14 +641,15 @@ function renameTab(t) {
 }
 
 function tabMenu(t, x, y) {
-  const claude = isClaudeCmd(t.command);
+  const claude = isAgent(t);
   showMenu(x, y, [
     { label: '이름 변경', onClick: () => renameTab(t) },
-    claude && { label: '다시 시작 (이어서)', onClick: () => restartTab(t, continueCommand(t.command)) },
-    claude && { label: '새 대화로 다시 시작', onClick: () => restartTab(t, freshCommand(t.command)) },
+    { label: '실행 프로그램 변경…', onClick: () => changeProgramModal(t) },
+    claude && { label: '다시 시작 (이어서)', onClick: () => restartTab(t, continueCommand(t)) },
+    claude && { label: '새 대화로 다시 시작', onClick: () => restartTab(t, freshCommand(t)) },
     !claude && { label: '다시 시작', onClick: () => restartTab(t) },
-    { label: '같은 위치에 새 세션', onClick: () => createTab({ hostId: t.hostId, cwd: t.cwd, command: freshCommand(t.command || 'claude') }) },
-    { label: '빠른 실행에 추가', onClick: () => addFavorite({ name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command }) },
+    { label: '같은 위치에 새 세션', onClick: () => createTab({ hostId: t.hostId, cwd: t.cwd, command: freshCommand(t), program: t.program }) },
+    { label: '빠른 실행에 추가', onClick: () => addFavorite({ name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program }) },
     { label: '파일 패널', sc: 'Ctrl+Shift+E', onClick: () => { setActive(t.id); state.filePanel.open = true; renderFilePanel(); } },
     '-',
     { label: '세션 닫기', sc: 'Ctrl+Shift+W', danger: true, onClick: () => closeTab(t) },
@@ -680,7 +689,7 @@ function renderFavorites() {
 }
 
 function addFavorite(f) {
-  state.favorites.push({ name: f.name || defaultName(f.hostId, f.cwd), hostId: f.hostId, cwd: f.cwd, command: f.command });
+  state.favorites.push({ name: f.name || defaultName(f.hostId, f.cwd), hostId: f.hostId, cwd: f.cwd, command: f.command, program: f.program !== undefined ? f.program : inferProgram(f.command) });
   deck.setConfig({ favorites: state.favorites });
   renderFavorites();
   toast(`빠른 실행에 추가: ${f.name}`);
@@ -703,10 +712,10 @@ $('#btn-restart').addEventListener('click', () => {
   const tab = activeTab();
   if (!tab) return;
   const r = $('#btn-restart').getBoundingClientRect();
-  if (isClaudeCmd(tab.command)) {
+  if (isAgent(tab)) {
     showMenu(r.left, r.bottom + 4, [
-      { label: '이어서 다시 시작 (--continue)', onClick: () => restartTab(tab, continueCommand(tab.command)) },
-      { label: '새 대화로 다시 시작', onClick: () => restartTab(tab, freshCommand(tab.command)) },
+      { label: '이어서 다시 시작 (--continue)', onClick: () => restartTab(tab, continueCommand(tab)) },
+      { label: '새 대화로 다시 시작', onClick: () => restartTab(tab, freshCommand(tab)) },
     ]);
   } else restartTab(tab);
 });
@@ -1131,46 +1140,87 @@ function toast(msg, { error = false, sticky = false, timeout = 3500, actions = [
 }
 
 // ───────────────────────── new session ─────────────────────────
+function programOptions(selected, { extras = true } = {}) {
+  return [
+    ...programs().map((p) => h('option', { value: p, selected: p === selected }, p)),
+    h('option', { value: '__add' }, '＋ 다른 프로그램 추가…'),
+    extras ? h('option', { value: '__shell', selected: selected === '__shell' }, '셸만 열기') : null,
+    extras ? h('option', { value: '__custom', selected: selected === '__custom' }, '명령 직접 입력…') : null,
+  ];
+}
+
+async function addProgramModal() {
+  const v = await promptModal({
+    title: '실행 프로그램 추가',
+    message:
+      'claude 대신 실행할 명령을 입력하세요.\n예: claude-glm, ccr code, npx @anthropic-ai/claude-code\n\n' +
+      '로컬은 PowerShell 프로필의 함수와 별칭을,\n원격은 .bashrc의 별칭을 그대로 쓸 수 있습니다.',
+    input: 'text',
+    okLabel: '추가',
+  });
+  const p = (v || '').trim();
+  if (!p) return null;
+  if (!programs().includes(p)) {
+    state.settings.programs = [...programs(), p];
+    deck.setConfig({ settings: state.settings });
+  }
+  return p;
+}
+
 async function newSessionModal(preset = {}) {
   const cfg = await deck.getConfig();
   state.recentPaths = cfg.recentPaths || {};
   let hostId = preset.hostId || state.lastHostId || 'local';
   if (!state.hosts.find((x) => x.id === hostId)) hostId = 'local';
 
-  const hostSel = h('select', {},
-    state.hosts.map((x) => h('option', { value: x.id, selected: x.id === hostId }, x.kind === 'local' ? `💻 로컬 (${x.detail})` : `🖥 ${x.name} · ${x.detail}`)),
-    h('option', { value: '__add' }, '＋ 서버 추가…'));
-  const pathIn = h('input', { type: 'text', spellcheck: false, placeholder: '~ 또는 절대 경로' });
+  const hostOptions = () => [
+    ...state.hosts.map((x) =>
+      h('option', { value: x.id, selected: x.id === hostId }, x.kind === 'local' ? `💻 로컬 (${x.detail})` : `🖥 ${x.name} · ${x.detail}`)),
+    h('option', { value: '__add' }, '＋ 서버 추가…'),
+  ];
+  const hostSel = h('select', {}, hostOptions());
+  const pathIn = h('input', { type: 'text', spellcheck: 'false', placeholder: '~ 또는 절대 경로' });
   const chips = h('div', { class: 'chips' });
-  const cmdSel = h('select', {}, COMMANDS.map((c) => h('option', { value: c.value }, c.label)));
-  const customIn = h('input', { type: 'text', spellcheck: false, placeholder: '예: npm run dev', hidden: true });
-  const argsIn = h('input', { type: 'text', spellcheck: false, placeholder: '예: --model opus   --dangerously-skip-permissions' });
+  let lastProg = preset.program || state.lastProgram || programs()[0];
+  const progSel = h('select', {}, programOptions(lastProg));
+  const customIn = h('input', { type: 'text', spellcheck: 'false', placeholder: '예: npm run dev', style: 'margin-top:6px' });
+  const modeSel = h('select', {}, MODES.map((x) => h('option', { value: x.flag }, x.label)));
+  const argsIn = h('input', { type: 'text', spellcheck: 'false', placeholder: '예: --model opus   --dangerously-skip-permissions' });
   const nameIn = h('input', { type: 'text', placeholder: '비워두면 폴더 이름' });
   const favChk = h('input', { type: 'checkbox' });
-  const argsField = h('div', { class: 'field' }, h('label', {}, 'Claude 추가 옵션 (선택)'), argsIn);
+  const agentFields = h('div', {},
+    h('div', { class: 'field' }, h('label', {}, '대화'), modeSel),
+    h('div', { class: 'field' }, h('label', {}, '추가 옵션 (선택)'), argsIn));
+  const syncProgFields = () => {
+    customIn.hidden = progSel.value !== '__custom';
+    agentFields.hidden = progSel.value === '__custom' || progSel.value === '__shell';
+  };
+  syncProgFields();
 
   const fillPaths = () => {
     const recent = state.recentPaths[hostId] || [];
     pathIn.value = preset.cwd || recent[0] || '~';
     preset.cwd = null;
-    chips.replaceChildren(...recent.slice(0, 8).map((p) => h('button', { class: 'chip', title: p, onclick: () => (pathIn.value = p, pathIn.focus()) }, shortPath(p))));
+    chips.replaceChildren(...recent.slice(0, 8).map((p) => h('button', { class: 'chip', title: p, onclick: () => ((pathIn.value = p), pathIn.focus()) }, shortPath(p))));
   };
   fillPaths();
   hostSel.addEventListener('change', async () => {
     if (hostSel.value === '__add') {
       const added = await hostFormModal();
       state.hosts = await deck.hosts();
-      hostSel.replaceChildren(
-        ...state.hosts.map((x) => h('option', { value: x.id }, x.kind === 'local' ? `💻 로컬 (${x.detail})` : `🖥 ${x.name} · ${x.detail}`)),
-        h('option', { value: '__add' }, '＋ 서버 추가…'));
       hostId = added?.id || hostId;
+      hostSel.replaceChildren(...hostOptions());
       hostSel.value = hostId;
     } else hostId = hostSel.value;
     fillPaths();
   });
-  cmdSel.addEventListener('change', () => {
-    customIn.hidden = cmdSel.value !== '__custom';
-    argsField.hidden = !isClaudeCmd(cmdSel.value);
+  progSel.addEventListener('change', async () => {
+    if (progSel.value === '__add') {
+      const p = await addProgramModal();
+      progSel.replaceChildren(...programOptions(p || lastProg));
+    }
+    lastProg = progSel.value;
+    syncProgFields();
     if (!customIn.hidden) customIn.focus();
   });
   const browse = async () => {
@@ -1179,14 +1229,23 @@ async function newSessionModal(preset = {}) {
   };
 
   const launch = () => {
-    let command = cmdSel.value === '__custom' ? customIn.value.trim() : cmdSel.value;
-    if (isClaudeCmd(command) && argsIn.value.trim()) command += ' ' + argsIn.value.trim();
+    const v = progSel.value;
+    if (v === '__add') return;
+    let command;
+    let program = null;
+    if (v === '__custom') command = customIn.value.trim();
+    else if (v === '__shell') command = '';
+    else {
+      program = v;
+      command = [v, modeSel.value, argsIn.value.trim()].filter(Boolean).join(' ');
+      state.lastProgram = v;
+    }
     const cwd = pathIn.value.trim() || '~';
     const name = nameIn.value.trim() || undefined;
     state.lastHostId = hostId;
     m.close();
-    const tab = createTab({ hostId, cwd, command, name });
-    if (favChk.checked) addFavorite({ name: tab.name, hostId, cwd, command });
+    const tab = createTab({ hostId, cwd, command, program, name });
+    if (favChk.checked) addFavorite({ name: tab.name, hostId, cwd, command, program });
   };
 
   const m = openModal({
@@ -1196,8 +1255,8 @@ async function newSessionModal(preset = {}) {
       h('div', { class: 'field' }, h('label', {}, '폴더'),
         h('div', { class: 'row' }, h('div', { class: 'grow' }, pathIn), h('button', { class: 'btn', onclick: browse }, '찾아보기…')),
         chips),
-      h('div', { class: 'field' }, h('label', {}, '실행'), cmdSel, customIn),
-      argsField,
+      h('div', { class: 'field' }, h('label', {}, '실행 프로그램'), progSel, customIn),
+      agentFields,
       h('div', { class: 'field' }, h('label', {}, '탭 이름'), nameIn),
       h('label', { class: 'check' }, favChk, '빠른 실행에 저장')),
     actions: [
@@ -1209,6 +1268,42 @@ async function newSessionModal(preset = {}) {
     pathIn.focus();
     pathIn.select();
   }, 0);
+}
+
+// Switch a tab to another program (e.g. claude → claude-glm), keeping its flags and args
+function changeProgramModal(t) {
+  const current = t.program || programs()[0];
+  const sel = h('select', {}, programOptions(current, { extras: false }));
+  sel.addEventListener('change', async () => {
+    if (sel.value !== '__add') return;
+    const p = await addProgramModal();
+    sel.replaceChildren(...programOptions(p || current, { extras: false }));
+  });
+  const apply = (keepConversation) => {
+    const program = sel.value;
+    if (program === '__add') return;
+    const rest = isAgent(t) ? t.command.slice(t.program.length) : '';
+    t.program = program;
+    t.command = program + rest;
+    persistTabs();
+    renderTabs();
+    m.close();
+    restartTab(t, keepConversation ? continueCommand(t) : freshCommand(t));
+  };
+  const m = openModal({
+    title: `"${t.name}" 실행 프로그램 변경`,
+    body: h('div', {},
+      h('div', { class: 'field' }, h('label', {}, '프로그램'), sel),
+      h('div', { class: 'prompt-msg' }, `지금: ${t.command || '(셸)'}`),
+      h('div', { class: 'hint' },
+        '바꾸면 이 탭의 세션을 다시 시작합니다. 같은 대화 기록을 쓰는 래퍼(claude-glm 등)라면 이어서 시작할 수 있고, ' +
+        '별도 설정 폴더를 쓰는 프로그램이면 새 대화로 시작하세요.')),
+    actions: [
+      { label: '취소', onClick: () => m.close() },
+      { label: '새 대화로 시작', onClick: () => apply(false) },
+      { label: '바꾸고 이어서 시작', primary: true, onClick: () => apply(true) },
+    ],
+  });
 }
 
 function dirBrowserModal(hostId, start) {
@@ -1367,12 +1462,16 @@ function settingsModal() {
   const shellSel = h('select', {},
     [['auto', '자동 (PowerShell 7 있으면 우선)'], ['pwsh', 'PowerShell 7 (pwsh)'], ['powershell', 'Windows PowerShell 5.1'], ['cmd', '명령 프롬프트 (cmd)']]
       .map(([v, l]) => h('option', { value: v, selected: s.localShell === v }, l)));
+  const progs = h('textarea', { rows: 4, spellcheck: 'false' });
+  progs.value = programs().join('\n');
   const notify = h('input', { type: 'checkbox', checked: s.notify });
   const m = openModal({
     title: '설정',
     body: h('div', {},
       h('div', { class: 'field' }, h('label', {}, '글꼴 크기'), font, h('div', { class: 'hint' }, 'Ctrl + = / Ctrl + - 로도 조절됩니다.')),
       h('div', { class: 'field' }, h('label', {}, '로컬 세션 셸'), shellSel, h('div', { class: 'hint' }, '다음에 여는 로컬 세션부터 적용됩니다.')),
+      h('div', { class: 'field' }, h('label', {}, '실행 프로그램'), progs,
+        h('div', { class: 'hint' }, '한 줄에 하나씩 적습니다. 새 세션 창과 탭 메뉴의 "실행 프로그램 변경"에 나옵니다. 예: claude, claude-glm')),
       h('label', { class: 'check' }, notify, '창이 백그라운드일 때 Claude 응답 완료를 Windows 알림으로 받기')),
     actions: [
       { label: '취소', onClick: () => m.close() },
@@ -1380,7 +1479,8 @@ function settingsModal() {
         label: '저장',
         primary: true,
         onClick: () => {
-          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked };
+          const list = progs.value.split('\n').map((x) => x.trim()).filter(Boolean);
+          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, programs: list.length ? list : ['claude'] };
           setFontSize(parseInt(font.value, 10) || 14);
           m.close();
         },
@@ -1399,6 +1499,7 @@ $('#btn-settings').addEventListener('click', settingsModal);
   const [hosts, cfg] = await Promise.all([deck.hosts(), deck.getConfig()]);
   state.hosts = hosts;
   state.settings = { ...state.settings, ...(cfg.settings || {}) };
+  if (!state.settings.programs?.length) state.settings.programs = ['claude'];
   state.favorites = cfg.favorites || [];
   state.recentPaths = cfg.recentPaths || {};
   for (const t of cfg.tabs || []) createTab({ ...t, paused: true }, { activate: false });

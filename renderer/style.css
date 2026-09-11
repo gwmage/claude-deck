@@ -226,7 +226,9 @@ kbd {
 .modal-foot { padding: 12px 20px 16px; display: flex; justify-content: flex-end; gap: 8px; }
 .field { margin: 10px 0; }
 .field > label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; font-weight: 500; }
-.field input[type=text], .field input[type=password], .field input[type=number], .field select, .dir-path {
+.field textarea { resize: vertical; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12.5px; line-height: 1.6; }
+.prog-tag { color: #d9a08b; }
+.field input[type=text], .field input[type=password], .field input[type=number], .field select, .field textarea, .dir-path {
   width: 100%; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--text); outline: none;
 }
 .field input:focus, .field select:focus, .dir-path:focus { border-color: var(--accent); }
