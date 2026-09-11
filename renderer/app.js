@@ -71,6 +71,8 @@ function inferProgram(cmd) {
   const known = [...new Set([...programs(), 'claude'])].sort((a, b) => b.length - a.length);
   return known.find((p) => cmd === p || cmd.startsWith(p + ' ')) || null;
 }
+const tmuxNameFor = (cwd) =>
+  'deck-' + ((basename(cwd || '') || '').replace(/[^\w-]/g, '').slice(0, 24) || 'session') + '-' + Math.random().toString(36).slice(2, 6);
 const isAgent = (tab) => !!tab.program && (tab.command === tab.program || tab.command.startsWith(tab.program + ' '));
 // same program and args, re-flagged with --continue; a pinned "--resume <id>" is kept so the exact conversation reopens
 function continueCommand(tab) {
@@ -102,6 +104,7 @@ function createTab(opts, { activate: doActivate = true } = {}) {
     cwd: opts.cwd || '~',
     command: opts.command ?? 'claude',
     program: opts.program !== undefined ? opts.program : inferProgram(opts.command ?? 'claude'),
+    tmux: opts.tmux || null,
     status: 'new',
     title: '',
     attention: false,
@@ -227,6 +230,7 @@ async function startTab(tab, command = tab.command) {
       hostId: tab.hostId,
       cwd: tab.cwd,
       command,
+      tmux: tab.tmux,
       cols: tab.term.cols,
       rows: tab.term.rows,
     });
@@ -242,24 +246,64 @@ async function startTab(tab, command = tab.command) {
   if (tab.id === state.activeId) renderFilePanel();
 }
 
-async function restartTab(tab, command) {
+async function restartTab(tab, command, { keepServerSession = false } = {}) {
   await deck.kill(tab.id);
+  if (tab.tmux && !keepServerSession) await deck.tmuxKill({ hostId: tab.hostId, name: tab.tmux }).catch(() => {});
   tab.term.reset();
   startTab(tab, command);
 }
 
+// move a plain remote tab into tmux: same conversation (--resume id / --continue) relaunched inside a new tmux session
+async function convertToKeep(t) {
+  const ok = await confirmModal({
+    title: '세션 보존으로 전환',
+    message:
+      '"' + t.name + '" 대화를 서버의 tmux 안에서 다시 띄웁니다.\n' +
+      '대화 내용은 이어지지만, 지금 진행 중인 응답은 한 번 끊깁니다.\n' +
+      '전환 후에는 창을 닫거나 컴퓨터를 꺼도 서버에서 계속 돌아갑니다.',
+    okLabel: '전환',
+  });
+  if (!ok) return;
+  t.tmux = tmuxNameFor(t.cwd);
+  persistTabs();
+  renderTabs();
+  restartTab(t, continueCommand(t), { keepServerSession: true });
+}
+
+// attach to the tab's tmux session if it is still alive; otherwise start it again, continuing the conversation
+function reconnectTab(tab) {
+  restartTab(tab, continueCommand(tab), { keepServerSession: true });
+}
+
 async function closeTab(tab, { confirm = true } = {}) {
   const alive = tab.status === 'running' || tab.status === 'connecting';
-  if (alive && confirm) {
+  let killServer = false;
+  if (tab.tmux) {
+    const choice = await choiceModal({
+      title: '보존 세션 닫기',
+      message:
+        '"' + tab.name + '"은 서버의 tmux 세션(' + tab.tmux + ')에서 돌고 있습니다.\n' +
+        '연결만 끊으면 Claude는 서버에서 계속 실행되고, 새 세션 창에서 다시 붙을 수 있습니다.',
+      choices: [
+        { value: 'kill', label: '서버 세션까지 종료', danger: true },
+        { value: 'detach', label: '연결만 끊기', primary: true },
+      ],
+    });
+    if (!choice) return;
+    killServer = choice === 'kill';
+  } else if (alive && confirm) {
     const ok = await confirmModal({
       title: '세션을 닫을까요?',
-      message: `"${tab.name}" 세션이 실행 중입니다.\n닫으면 이 세션의 Claude가 종료됩니다.`,
+      message: '"' + tab.name + '" 세션이 실행 중입니다.\n닫으면 이 세션의 Claude가 종료됩니다.',
       okLabel: '세션 닫기',
       danger: true,
     });
     if (!ok) return;
   }
   await deck.kill(tab.id);
+  if (killServer) {
+    await deck.tmuxKill({ hostId: tab.hostId, name: tab.tmux }).catch((err) => toast('서버 세션 종료 실패: ' + cleanErr(err), { error: true }));
+  }
   const idx = state.tabs.indexOf(tab);
   state.tabs.splice(idx, 1);
   tab.term.dispose();
@@ -277,7 +321,7 @@ async function closeTab(tab, { confirm = true } = {}) {
 
 function persistTabs() {
   deck.setConfig({
-    tabs: state.tabs.map((t) => ({ id: t.id, name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program })),
+    tabs: state.tabs.map((t) => ({ id: t.id, name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, tmux: t.tmux })),
   });
 }
 
@@ -294,14 +338,15 @@ function flagAttention(tab, reason) {
 // ── overlay for paused / exited / error tabs
 function showOverlay(tab) {
   hideOverlay(tab);
-  const claude = isAgent(tab);
-  const msg = {
-    paused: '<b>이전 세션</b> · 다시 열까요?',
-    exited: '<b>세션 종료됨</b>',
-    error: '<b>시작하지 못했습니다</b>',
-  }[tab.status] || '';
+  const agent = isAgent(tab);
+  const msg = (tab.tmux
+    ? { paused: '<b>보존된 세션</b> · 서버에서 계속 실행 중일 수 있습니다', exited: '<b>연결 끊김</b> · 서버의 세션은 살아 있을 수 있습니다', error: '<b>연결하지 못했습니다</b>' }
+    : { paused: '<b>이전 세션</b> · 다시 열까요?', exited: '<b>세션 종료됨</b>', error: '<b>시작하지 못했습니다</b>' })[tab.status] || '';
   const btns = [];
-  if (claude) {
+  if (tab.tmux) {
+    btns.push(h('button', { class: 'primary', onclick: () => reconnectTab(tab) }, '다시 연결'));
+    if (agent) btns.push(h('button', { class: 'btn', title: '서버의 세션을 끝내고 새로 시작', onclick: () => restartTab(tab, freshCommand(tab)) }, '새 대화로 시작'));
+  } else if (agent) {
     btns.push(h('button', { class: 'primary', onclick: () => restartTab(tab, continueCommand(tab)) }, '이어서 시작'));
     btns.push(h('button', { class: 'btn', onclick: () => restartTab(tab, freshCommand(tab)) }, '새 대화로 시작'));
   } else {
@@ -528,10 +573,11 @@ window.addEventListener(
       return;
     }
     if (ctrl && key === 'v') return stop(), pasteInto(tab);
-    // Shift+Enter → newline in Claude's prompt (sent as Meta+Enter)
-    if (e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'Enter') {
+    // Ctrl+Enter / Shift+Enter → newline in Claude's prompt. xterm sends a plain CR (submit) for both;
+    // Windows Terminal sends LF (Ctrl+J), which Claude treats as "insert newline".
+    if ((e.ctrlKey || e.shiftKey) && !e.altKey && !e.metaKey && e.key === 'Enter') {
       stop();
-      if (tab.status === 'running') deck.input(tab.id, '\x1b\r');
+      if (tab.status === 'running') deck.input(tab.id, '\n');
     }
   },
   true
@@ -598,7 +644,7 @@ function renderTabs() {
         h('span', { class: 'dot' }),
         h('div', { class: 'tab-text' },
           h('div', { class: 'tab-name' }, t.name),
-          h('div', { class: 'tab-sub' }, t.program && t.program !== 'claude' ? h('span', { class: 'prog-tag' }, t.program + ' · ') : null, t.title && t.status === 'running' ? t.title : shortPath(t.cwd))),
+          h('div', { class: 'tab-sub' }, t.tmux ? h('span', { class: 'keep-tag', title: 'tmux 세션 ' + t.tmux }, '보존 · ') : null, t.program && t.program !== 'claude' ? h('span', { class: 'prog-tag' }, t.program + ' · ') : null, t.title && t.status === 'running' ? t.title : shortPath(t.cwd))),
         idx < 9 ? h('span', { class: 'tab-key' }, `^${idx + 1}`) : null,
         h('button', {
           class: 'tab-more',
@@ -645,11 +691,13 @@ function tabMenu(t, x, y) {
   showMenu(x, y, [
     { label: '이름 변경', onClick: () => renameTab(t) },
     { label: '실행 프로그램 변경…', onClick: () => changeProgramModal(t) },
+    t.tmux && { label: '다시 연결 (서버 세션에 붙기)', onClick: () => reconnectTab(t) },
+    isRemote(t) && !t.tmux && { label: '세션 보존으로 전환', onClick: () => convertToKeep(t) },
     claude && { label: '다시 시작 (이어서)', onClick: () => restartTab(t, continueCommand(t)) },
     claude && { label: '새 대화로 다시 시작', onClick: () => restartTab(t, freshCommand(t)) },
     !claude && { label: '다시 시작', onClick: () => restartTab(t) },
-    { label: '같은 위치에 새 세션', onClick: () => createTab({ hostId: t.hostId, cwd: t.cwd, command: freshCommand(t), program: t.program }) },
-    { label: '빠른 실행에 추가', onClick: () => addFavorite({ name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program }) },
+    { label: '같은 위치에 새 세션', onClick: () => createTab({ hostId: t.hostId, cwd: t.cwd, command: freshCommand(t), program: t.program, tmux: t.tmux ? tmuxNameFor(t.cwd) : null }) },
+    { label: '빠른 실행에 추가', onClick: () => addFavorite({ name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, keep: !!t.tmux }) },
     { label: '파일 패널', sc: 'Ctrl+Shift+E', onClick: () => { setActive(t.id); state.filePanel.open = true; renderFilePanel(); } },
     '-',
     { label: '세션 닫기', sc: 'Ctrl+Shift+W', danger: true, onClick: () => closeTab(t) },
@@ -668,7 +716,7 @@ function renderFavorites() {
       h('div', {
         class: 'fav',
         title: `${hostById(f.hostId).name}: ${f.cwd}\n${f.command || '(셸)'}`,
-        onclick: () => createTab({ ...f, name: undefined }),
+        onclick: () => createTab({ ...f, name: undefined, tmux: f.keep ? tmuxNameFor(f.cwd) : null }),
       },
       h('span', { class: 'fav-icon' }, '▶'),
       h('div', { class: 'fav-text' },
@@ -689,7 +737,7 @@ function renderFavorites() {
 }
 
 function addFavorite(f) {
-  state.favorites.push({ name: f.name || defaultName(f.hostId, f.cwd), hostId: f.hostId, cwd: f.cwd, command: f.command, program: f.program !== undefined ? f.program : inferProgram(f.command) });
+  state.favorites.push({ name: f.name || defaultName(f.hostId, f.cwd), hostId: f.hostId, cwd: f.cwd, command: f.command, program: f.program !== undefined ? f.program : inferProgram(f.command), keep: !!f.keep });
   deck.setConfig({ favorites: state.favorites });
   renderFavorites();
   toast(`빠른 실행에 추가: ${f.name}`);
@@ -714,6 +762,7 @@ $('#btn-restart').addEventListener('click', () => {
   const r = $('#btn-restart').getBoundingClientRect();
   if (isAgent(tab)) {
     showMenu(r.left, r.bottom + 4, [
+      tab.tmux && { label: '다시 연결 (서버 세션에 붙기)', onClick: () => reconnectTab(tab) },
       { label: '이어서 다시 시작 (--continue)', onClick: () => restartTab(tab, continueCommand(tab)) },
       { label: '새 대화로 다시 시작', onClick: () => restartTab(tab, freshCommand(tab)) },
     ]);
@@ -1079,6 +1128,21 @@ function confirmModal({ title, message, okLabel = '확인', danger = false }) {
   });
 }
 
+function choiceModal({ title, message, choices }) {
+  return new Promise((resolve) => {
+    const done = (v) => (m.close(), resolve(v));
+    const m = openModal({
+      title,
+      body: h('div', { class: 'prompt-msg' }, message),
+      onCancel: () => resolve(null),
+      actions: [
+        { label: '취소', onClick: () => done(null) },
+        ...choices.map((c) => ({ label: c.label, primary: c.primary, danger: c.danger, onClick: () => done(c.value) })),
+      ],
+    });
+  });
+}
+
 function promptModal(req) {
   return new Promise((resolve) => {
     const input = req.input ? h('input', { type: req.input === 'password' ? 'password' : 'text', autocomplete: 'off' }) : null;
@@ -1188,6 +1252,47 @@ async function newSessionModal(preset = {}) {
   const argsIn = h('input', { type: 'text', spellcheck: 'false', placeholder: '예: --model opus   --dangerously-skip-permissions' });
   const nameIn = h('input', { type: 'text', placeholder: '비워두면 폴더 이름' });
   const favChk = h('input', { type: 'checkbox' });
+  const keepChk = h('input', { type: 'checkbox', checked: state.lastKeep !== false });
+  const keepRow = h('div', { class: 'field' },
+    h('label', { class: 'check' }, keepChk, '세션 보존 (서버 tmux에서 실행해서, 창을 닫거나 연결이 끊겨도 계속 돌아감)'));
+  const liveBox = h('div', { class: 'live-sessions' });
+  let liveSeq = 0;
+  const refreshLive = async () => {
+    const seq = ++liveSeq;
+    keepRow.hidden = hostId === 'local';
+    liveBox.replaceChildren();
+    if (hostId === 'local') return;
+    let list = [];
+    try {
+      list = await deck.tmuxList(hostId);
+    } catch {
+      return;
+    }
+    if (seq !== liveSeq) return;
+    const open = new Set(state.tabs.map((t) => t.tmux).filter(Boolean));
+    list = list.filter((x) => !open.has(x.name));
+    if (!list.length) return;
+    const hostForLive = hostId;
+    liveBox.append(
+      h('label', {}, '이 서버에서 계속 실행 중인 세션 (눌러서 다시 붙기)'),
+      h('div', { class: 'chips' },
+        list.map((x) =>
+          h('button', {
+            class: 'chip live',
+            title: (x.cwd || '') + (x.attached ? '\n지금 다른 곳에 연결되어 있음' : ''),
+            onclick: () => {
+              m.close();
+              createTab({
+                hostId: hostForLive,
+                cwd: x.cwd || '~',
+                command: programs()[0],
+                tmux: x.name,
+                name: x.name.replace(/^deck-/, '').replace(/-[a-z0-9]{4}$/, ''),
+              });
+            },
+          }, '⏺ ' + x.name)))
+    );
+  };
   const agentFields = h('div', {},
     h('div', { class: 'field' }, h('label', {}, '대화'), modeSel),
     h('div', { class: 'field' }, h('label', {}, '추가 옵션 (선택)'), argsIn));
@@ -1201,6 +1306,7 @@ async function newSessionModal(preset = {}) {
     const recent = state.recentPaths[hostId] || [];
     pathIn.value = preset.cwd || recent[0] || '~';
     preset.cwd = null;
+    refreshLive();
     chips.replaceChildren(...recent.slice(0, 8).map((p) => h('button', { class: 'chip', title: p, onclick: () => ((pathIn.value = p), pathIn.focus()) }, shortPath(p))));
   };
   fillPaths();
@@ -1242,10 +1348,12 @@ async function newSessionModal(preset = {}) {
     }
     const cwd = pathIn.value.trim() || '~';
     const name = nameIn.value.trim() || undefined;
+    const tmux = hostId !== 'local' && keepChk.checked ? tmuxNameFor(cwd) : null;
+    if (hostId !== 'local') state.lastKeep = keepChk.checked;
     state.lastHostId = hostId;
     m.close();
-    const tab = createTab({ hostId, cwd, command, program, name });
-    if (favChk.checked) addFavorite({ name: tab.name, hostId, cwd, command, program });
+    const tab = createTab({ hostId, cwd, command, program, name, tmux });
+    if (favChk.checked) addFavorite({ name: tab.name, hostId, cwd, command, program, keep: !!tmux });
   };
 
   const m = openModal({
@@ -1254,9 +1362,10 @@ async function newSessionModal(preset = {}) {
       h('div', { class: 'field' }, h('label', {}, '어디서'), hostSel),
       h('div', { class: 'field' }, h('label', {}, '폴더'),
         h('div', { class: 'row' }, h('div', { class: 'grow' }, pathIn), h('button', { class: 'btn', onclick: browse }, '찾아보기…')),
-        chips),
+        chips, liveBox),
       h('div', { class: 'field' }, h('label', {}, '실행 프로그램'), progSel, customIn),
       agentFields,
+      keepRow,
       h('div', { class: 'field' }, h('label', {}, '탭 이름'), nameIn),
       h('label', { class: 'check' }, favChk, '빠른 실행에 저장')),
     actions: [

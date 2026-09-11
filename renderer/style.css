@@ -228,6 +228,9 @@ kbd {
 .field > label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; font-weight: 500; }
 .field textarea { resize: vertical; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12.5px; line-height: 1.6; }
 .prog-tag { color: #d9a08b; }
+.keep-tag { color: var(--green); }
+.chip.live { color: #9fe0b5; border-color: #5fcf8a55; }
+.live-sessions > label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 0; }
 .field input[type=text], .field input[type=password], .field input[type=number], .field select, .field textarea, .dir-path {
   width: 100%; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--text); outline: none;
 }

@@ -434,7 +434,35 @@ function startLocal({ id, cwd, command, cols, rows }) {
   return { cwd: dir };
 }
 
-async function startRemote({ id, hostId, cwd, command, cols, rows }) {
+const TMUX_NAME_RE = /^[\w.-]{1,64}$/;
+
+// Shell line typed into the remote login shell. With `tmux`, the program runs inside a named tmux
+// session: reconnecting attaches to it if it still exists, so Claude survives SSH drops and app restarts.
+function buildRemoteLine(dir, command, tmux) {
+  if (!tmux) {
+    const parts = [];
+    if (dir) parts.push(`cd ${shq(dir)}`);
+    parts.push('clear');
+    if (command) parts.push(command);
+    return parts.join(' && ');
+  }
+  if (!TMUX_NAME_RE.test(tmux)) throw new Error(`잘못된 세션 이름: ${tmux}`);
+  const exact = shq('=' + tmux);
+  const create = [
+    `tmux new-session -s ${shq(tmux)}${dir ? ' -c ' + shq(dir) : ''}`,
+    'set-option status off',
+    'set-option mouse on',
+    'set-option set-titles on',
+    "set-option set-titles-string '#T'",
+    ...(command ? [`send-keys ${shq(command)} Enter`] : []),
+  ].join(' \\; ');
+  return (
+    "command -v tmux >/dev/null || { echo 'tmux가 설치되어 있지 않습니다 (sudo apt install tmux)'; exit 1; }; clear; " +
+    `if tmux has-session -t ${exact} 2>/dev/null; then exec tmux attach-session -t ${exact}; else exec ${create}; fi`
+  );
+}
+
+async function startRemote({ id, hostId, cwd, command, cols, rows, tmux }) {
   const entry = await getConn(hostId);
   let dir = null;
   if (cwd) {
@@ -461,14 +489,30 @@ async function startRemote({ id, hostId, cwd, command, cols, rows }) {
     if (sessions.get(id) === s) sessions.delete(id);
     send('session:exit', id, null);
   });
-  const parts = [];
-  if (dir) parts.push(`cd ${shq(dir)}`);
-  parts.push('clear');
-  if (command) parts.push(command);
-  stream.write(parts.join(' && ') + '\n');
+  stream.write(buildRemoteLine(dir, command, tmux) + '\n');
   rememberPath(hostId, cwd || '~');
   return { cwd: dir };
 }
+
+ipcMain.handle('tmux:list', async (_e, hostId) => {
+  const entry = await getConn(hostId);
+  const { out } = await remoteExec(
+    entry,
+    "tmux list-sessions -F '#{session_name}\t#{session_created}\t#{session_attached}\t#{pane_current_path}' 2>/dev/null"
+  );
+  return out
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => {
+      const [name, created, attached, cwd] = l.split('\t');
+      return { name, created: Number(created) * 1000, attached: Number(attached), cwd };
+    });
+});
+ipcMain.handle('tmux:kill', async (_e, { hostId, name }) => {
+  if (!TMUX_NAME_RE.test(name)) throw new Error(`잘못된 세션 이름: ${name}`);
+  const entry = await getConn(hostId);
+  await remoteExec(entry, `tmux kill-session -t ${shq('=' + name)} 2>/dev/null`);
+});
 
 function killSession(id) {
   const s = sessions.get(id);

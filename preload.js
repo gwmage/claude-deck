@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('deck', {
   onData: on('session:data'),
   onExit: on('session:exit'),
   onFocusTab: on('focus-tab'),
+  tmuxList: invoke('tmux:list'),
+  tmuxKill: invoke('tmux:kill'),
   onPrompt: on('prompt:ask'),
   answerPrompt: (rid, value) => ipcRenderer.send('prompt:answer', { rid, value }),
 
