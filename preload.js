@@ -46,7 +46,8 @@ contextBridge.exposeInMainWorld('deck', {
   // clipboard
   clipRead: invoke('clip:read'),
   clipSaveImage: invoke('clip:saveImage'),
-  clipWrite: (text) => ipcRenderer.send('clip:write', text),
+  pasteFromMain: invoke('clip:pasteCommand'),
+  clipWrite: invoke('clip:write'),
 
   // misc
   notify: (o) => ipcRenderer.send('notify', o),

@@ -24,7 +24,7 @@ const DEFAULT_CONFIG = {
   tabs: [],
   activeTab: null,
   knownHosts: {},
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: false },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true },
 };
 let config = structuredClone(DEFAULT_CONFIG);
 const configPath = () => path.join(app.getPath('userData'), 'config.json');
@@ -722,7 +722,15 @@ ipcMain.handle('clip:saveImage', async (_e, { hostId, bytes, ext }) => {
   await fs.promises.writeFile(f, Buffer.from(bytes));
   return hostId === 'local' ? f : uploadToRemote(hostId, f);
 });
-ipcMain.on('clip:write', (_e, text) => clipboard.writeText(text));
+// The app runs without a menu bar, so Chromium's built-in Ctrl+V never fires. Running the paste
+// command here dispatches a real paste event in the renderer, which is the only way to get image data.
+ipcMain.handle('clip:pasteCommand', () => {
+  win?.webContents.paste();
+});
+ipcMain.handle('clip:write', (_e, text) => {
+  clipboard.writeText(text);
+  return true;
+});
 
 // ───────────────────────── hosts / config ipc ─────────────────────────
 ipcMain.handle('hosts:list', () => listHosts());

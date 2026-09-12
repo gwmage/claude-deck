@@ -34,7 +34,7 @@ const state = {
   hosts: [],
   tabs: [],
   activeId: null,
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: false },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true },
   favorites: [],
   recentPaths: {},
   filePanel: { open: false, mode: 'recent' },
@@ -162,7 +162,7 @@ function createTab(opts, { activate: doActivate = true } = {}) {
   });
   term.onBell(() => flagAttention(tab, '벨'));
   term.onSelectionChange(() => {
-    if (state.settings.copyOnSelect && term.hasSelection()) deck.clipWrite(term.getSelection());
+    if (state.settings.copyOnSelect && term.hasSelection()) deck.clipWrite(term.getSelection()).catch(() => {});
   });
   const oscNotify = (data) => {
     if (/^4;/.test(data)) return true; // progress sequences
@@ -495,14 +495,21 @@ async function pastePaths(tab, localPaths) {
 
 function copyFromTab(tab) {
   if (!tab?.term.hasSelection()) return false;
-  deck.clipWrite(tab.term.getSelection());
-  tab.term.clearSelection();
-  toast('복사했습니다');
+  const text = tab.term.getSelection();
+  deck.clipWrite(text).then(
+    () => {
+      tab.term.clearSelection();
+      toast(`복사했습니다 (${text.length}자)`);
+    },
+    (err) => toast('복사하지 못했습니다: ' + cleanErr(err), { error: true })
+  );
   return true;
 }
 
 // Everything the clipboard can hand us: text, an image, or file paths.
+let awaitingPaste = false;
 async function handleClipboardData(tab, dt) {
+  awaitingPaste = false;
   if (!dt) return pasteInto(tab);
   const text = dt.getData('text/plain');
   if (text) {
@@ -542,27 +549,36 @@ async function pasteImageFile(tab, file) {
   }
 }
 
-// Used when no paste event is available (right click menu, focus outside the terminal).
-// Asking the browser to paste gives us a real paste event, which is the only way to reach image data.
+// Ctrl+V, right click, Shift+Insert all land here. Text and file paths come straight from the main
+// process; if the clipboard holds neither, it is probably an image, and only Electron's paste command
+// can hand us the bytes (this build's clipboard module has no readImage).
 async function pasteInto(tab) {
   if (!tab) return;
   if (tab.status !== 'running') return toast('세션이 실행 중이 아닙니다', { error: true });
   tab.term.focus();
-  try {
-    if (document.execCommand('paste')) return;
-  } catch {}
-  let clip;
+  let clip = { text: '', files: [] };
   try {
     clip = await deck.clipRead();
   } catch (err) {
-    return toast('클립보드를 읽지 못했습니다: ' + cleanErr(err), { error: true });
+    toast('클립보드를 읽지 못했습니다: ' + cleanErr(err), { error: true });
   }
   if (clip.text) {
     tab.term.paste(clip.text);
     return;
   }
   if (clip.files?.length) return pastePaths(tab, clip.files);
-  toast('붙여넣을 내용이 없습니다. 이미지라면 터미널을 한 번 클릭한 뒤 Ctrl+V를 누르세요.');
+  awaitingPaste = true;
+  try {
+    await deck.pasteFromMain();
+  } catch (err) {
+    awaitingPaste = false;
+    return toast('붙여넣기 실패: ' + cleanErr(err), { error: true });
+  }
+  setTimeout(() => {
+    if (!awaitingPaste) return;
+    awaitingPaste = false;
+    toast('붙여넣을 내용이 없습니다');
+  }, 600);
 }
 
 const termsEl = $('#terms');
@@ -634,7 +650,8 @@ window.addEventListener(
     if (ctrl && e.key === '0') return stop(), setFontSize(14);
 
     // only step aside for the app's own inputs; xterm's hidden textarea is not one of them
-    if (!tab || e.target.closest?.('input, select, textarea:not(.xterm-helper-textarea)')) return;
+    const inAppInput = !!e.target.closest?.('input, select, textarea') && !e.target.closest?.('.xterm');
+    if (!tab || inAppInput) return;
     if (ctrl && isKey('c') && (e.shiftKey || tab.term.hasSelection())) {
       stop();
       copyFromTab(tab);
@@ -642,8 +659,6 @@ window.addEventListener(
     }
     if (ctrl && e.key === 'Insert') return stop(), copyFromTab(tab);
     if ((ctrl && isKey('v')) || (e.shiftKey && e.key === 'Insert')) {
-      // with the terminal focused the browser fires a paste event, which carries images too
-      if (e.target.closest?.('.xterm')) return;
       stop();
       pasteInto(tab);
       return;
