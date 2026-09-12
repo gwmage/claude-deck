@@ -52,10 +52,13 @@ npm start
 - 뷰어: Markdown 렌더링, HTML, PDF, 이미지, CSV 표, JSON, 코드/텍스트, 동영상. 오피스·한글 파일은 외부 앱으로 엽니다.
 - `@` 버튼으로 파일을 Claude 입력창에 `@경로` 형태로 넣을 수 있습니다.
 
-**붙여넣기 / 드래그**
-- `Ctrl+V`로 이미지(스크린샷) 붙여넣기. 원격 세션이면 서버 `~/.claude-deck/uploads/`로 올리고 그 경로를 넣어줍니다.
+**복사 / 붙여넣기**
+- 복사: 드래그해서 선택한 뒤 `Ctrl+C`, 또는 우클릭. 설정에서 `마우스로 선택하면 바로 복사`를 켜면 드래그만으로 복사됩니다.
+- 붙여넣기: `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert`, 우클릭 모두 됩니다. 한글 입력 상태에서도 동작합니다.
+- 보존(tmux) 세션에서는 tmux가 마우스를 쓰기 때문에 `Shift`를 누른 채 드래그해야 선택됩니다.
+- 이미지(스크린샷)를 붙여넣으면 로컬은 임시 폴더에, 원격은 서버 `~/.claude-deck/uploads/`에 저장하고 그 경로를 입력창에 넣어줍니다.
 - 탐색기에서 파일을 끌어다 놓아도 똑같이 동작합니다.
-- `Shift+Enter`는 Claude 입력창 줄바꿈.
+- `Ctrl+Enter`와 `Shift+Enter`는 Claude 입력창 줄바꿈.
 
 ## 단축키
 
@@ -65,7 +68,9 @@ npm start
 | Ctrl+Shift+W | 세션 닫기 (확인) |
 | Ctrl+1 ~ 9, Ctrl+Tab | 탭 이동 |
 | Ctrl+Shift+E | 파일 패널 |
-| Ctrl+C (선택 있을 때), 우클릭 | 복사 / 붙여넣기 |
+| Ctrl+C (선택 있을 때) | 복사 |
+| Ctrl+V, Ctrl+Shift+V, Shift+Insert, 우클릭 | 붙여넣기 |
+| Ctrl+Enter, Shift+Enter | 입력창 줄바꿈 |
 | Ctrl+= / Ctrl+- / Ctrl+0 | 글꼴 크기 |
 | F12 | 개발자 도구 |
 

@@ -24,7 +24,7 @@ const DEFAULT_CONFIG = {
   tabs: [],
   activeTab: null,
   knownHosts: {},
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'] },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: false },
 };
 let config = structuredClone(DEFAULT_CONFIG);
 const configPath = () => path.join(app.getPath('userData'), 'config.json');
@@ -692,28 +692,34 @@ ipcMain.handle('fs:upload', async (_e, { hostId, files }) => {
 });
 
 // ───────────────────────── clipboard ─────────────────────────
+// This Electron build exposes only clear/has/read/readText/write/writeText on clipboard:
+// there is no readImage/readBuffer, so images arrive from the renderer's paste event instead.
 function clipboardFiles() {
   try {
-    const buf = clipboard.readBuffer('FileNameW');
-    if (!buf || !buf.length) return [];
-    const p = buf.toString('ucs2').replace(/\0.*$/s, '');
-    return p && fs.existsSync(p) ? [p] : [];
+    if (typeof clipboard.has !== 'function' || !clipboard.has('FileNameW')) return [];
+    const raw = (clipboard.read('FileNameW') || '').split(String.fromCharCode(0)).join('').trim();
+    return raw && fs.existsSync(raw) ? [raw] : [];
   } catch {
     return [];
   }
 }
-ipcMain.handle('clip:read', () => ({
-  text: clipboard.readText(),
-  hasImage: !clipboard.readImage().isEmpty(),
-  files: clipboardFiles(),
-}));
-ipcMain.handle('clip:image', async (_e, { hostId }) => {
-  const img = clipboard.readImage();
-  if (img.isEmpty()) return null;
+ipcMain.handle('clip:read', () => {
+  const safe = (fn, dflt) => {
+    try {
+      return fn();
+    } catch {
+      return dflt;
+    }
+  };
+  return { text: safe(() => clipboard.readText(), ''), files: safe(clipboardFiles, []) };
+});
+// bytes come from the renderer (paste event or drag payload); saved locally, uploaded when the tab is remote
+ipcMain.handle('clip:saveImage', async (_e, { hostId, bytes, ext }) => {
+  const safeExt = /^[a-z0-9]{1,5}$/i.test(ext || '') ? ext : 'png';
   const dir = path.join(CACHE_DIR, 'paste');
   await fs.promises.mkdir(dir, { recursive: true });
-  const f = path.join(dir, `paste-${Date.now()}.png`);
-  await fs.promises.writeFile(f, img.toPNG());
+  const f = path.join(dir, `paste-${Date.now()}.${safeExt}`);
+  await fs.promises.writeFile(f, Buffer.from(bytes));
   return hostId === 'local' ? f : uploadToRemote(hostId, f);
 });
 ipcMain.on('clip:write', (_e, text) => clipboard.writeText(text));

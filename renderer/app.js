@@ -34,7 +34,7 @@ const state = {
   hosts: [],
   tabs: [],
   activeId: null,
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'] },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: false },
   favorites: [],
   recentPaths: {},
   filePanel: { open: false, mode: 'recent' },
@@ -161,6 +161,9 @@ function createTab(opts, { activate: doActivate = true } = {}) {
     if (tab.id === state.activeId) updateTopbar();
   });
   term.onBell(() => flagAttention(tab, '벨'));
+  term.onSelectionChange(() => {
+    if (state.settings.copyOnSelect && term.hasSelection()) deck.clipWrite(term.getSelection());
+  });
   const oscNotify = (data) => {
     if (/^4;/.test(data)) return true; // progress sequences
     const body = data.split(';').filter(Boolean).pop() || '알림';
@@ -171,11 +174,8 @@ function createTab(opts, { activate: doActivate = true } = {}) {
   term.parser.registerOscHandler(777, oscNotify);
   host.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    if (term.hasSelection()) {
-      deck.clipWrite(term.getSelection());
-      term.clearSelection();
-      toast('복사했습니다');
-    } else pasteInto(tab);
+    if (term.hasSelection()) copyFromTab(tab);
+    else pasteInto(tab);
   });
 
   if (opts.paused) {
@@ -493,25 +493,93 @@ async function pastePaths(tab, localPaths) {
   tab.term.focus();
 }
 
-async function pasteInto(tab) {
-  if (!tab || tab.status !== 'running') return;
-  const clip = await deck.clipRead();
-  if (clip.text) return tab.term.paste(clip.text);
-  if (clip.files?.length) return pastePaths(tab, clip.files);
-  if (clip.hasImage) {
-    const t = toast(isRemote(tab) ? '이미지를 서버로 올리는 중…' : '이미지 저장 중…', { sticky: true });
-    try {
-      const p = await deck.clipImage({ hostId: tab.hostId });
-      if (p) tab.term.paste(quoteFor(tab, p) + ' ');
-    } catch (err) {
-      toast(`이미지 붙여넣기 실패: ${cleanErr(err)}`, { error: true });
-    } finally {
-      t.close();
+function copyFromTab(tab) {
+  if (!tab?.term.hasSelection()) return false;
+  deck.clipWrite(tab.term.getSelection());
+  tab.term.clearSelection();
+  toast('복사했습니다');
+  return true;
+}
+
+// Everything the clipboard can hand us: text, an image, or file paths.
+async function handleClipboardData(tab, dt) {
+  if (!dt) return pasteInto(tab);
+  const text = dt.getData('text/plain');
+  if (text) {
+    if (tab.status === 'running') {
+      tab.term.paste(text);
+      tab.term.focus();
     }
+    return;
+  }
+  const items = [...(dt.items || [])];
+  const imgItem = items.find((i) => i.kind === 'file' && i.type.startsWith('image/'));
+  const file = imgItem?.getAsFile();
+  if (file) {
+    const asPath = deck.pathForFile(file);
+    return asPath ? pastePaths(tab, [asPath]) : pasteImageFile(tab, file);
+  }
+  const paths = [...(dt.files || [])].map((f) => deck.pathForFile(f)).filter(Boolean);
+  if (paths.length) return pastePaths(tab, paths);
+  return pasteInto(tab);
+}
+
+async function pasteImageFile(tab, file) {
+  if (tab.status !== 'running') return toast('세션이 실행 중이 아닙니다', { error: true });
+  const t = toast(isRemote(tab) ? '이미지를 서버로 올리는 중…' : '이미지 저장 중…', { sticky: true });
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const ext = (file.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+    const p = await deck.clipSaveImage({ hostId: tab.hostId, bytes, ext });
+    if (p) {
+      tab.term.paste(quoteFor(tab, p) + ' ');
+      tab.term.focus();
+    }
+  } catch (err) {
+    toast('이미지 붙여넣기 실패: ' + cleanErr(err), { error: true });
+  } finally {
+    t.close();
   }
 }
 
+// Used when no paste event is available (right click menu, focus outside the terminal).
+// Asking the browser to paste gives us a real paste event, which is the only way to reach image data.
+async function pasteInto(tab) {
+  if (!tab) return;
+  if (tab.status !== 'running') return toast('세션이 실행 중이 아닙니다', { error: true });
+  tab.term.focus();
+  try {
+    if (document.execCommand('paste')) return;
+  } catch {}
+  let clip;
+  try {
+    clip = await deck.clipRead();
+  } catch (err) {
+    return toast('클립보드를 읽지 못했습니다: ' + cleanErr(err), { error: true });
+  }
+  if (clip.text) {
+    tab.term.paste(clip.text);
+    return;
+  }
+  if (clip.files?.length) return pastePaths(tab, clip.files);
+  toast('붙여넣을 내용이 없습니다. 이미지라면 터미널을 한 번 클릭한 뒤 Ctrl+V를 누르세요.');
+}
+
 const termsEl = $('#terms');
+termsEl.addEventListener('copy', (e) => {
+  const tab = activeTab();
+  if (!tab || !tab.term.hasSelection()) return;
+  e.clipboardData?.setData('text/plain', tab.term.getSelection());
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
+termsEl.addEventListener('paste', (e) => {
+  const tab = activeTab();
+  if (!tab) return;
+  e.preventDefault();
+  e.stopPropagation();
+  handleClipboardData(tab, e.clipboardData);
+}, true);
 termsEl.addEventListener('dragover', (e) => {
   e.preventDefault();
   termsEl.classList.add('drop');
@@ -537,6 +605,8 @@ window.addEventListener(
     const modalOpen = !!document.querySelector('.modal-back');
     const ctrl = e.ctrlKey && !e.altKey && !e.metaKey;
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    // layout independent: with the Korean IME on, e.key arrives as a Hangul jamo (Ctrl+V → 'ㅍ')
+    const isKey = (ch) => e.code === 'Key' + ch.toUpperCase() || key === ch;
     const tab = activeTab();
     const stop = () => {
       e.preventDefault();
@@ -545,9 +615,9 @@ window.addEventListener(
     if (e.key === 'F12') return stop(), deck.devtools();
     if (modalOpen) return;
 
-    if (ctrl && e.shiftKey && key === 't') return stop(), newSessionModal();
-    if (ctrl && e.shiftKey && key === 'w') return stop(), tab && closeTab(tab);
-    if (ctrl && e.shiftKey && key === 'e') return stop(), toggleFilePanel();
+    if (ctrl && e.shiftKey && isKey('t')) return stop(), newSessionModal();
+    if (ctrl && e.shiftKey && isKey('w')) return stop(), tab && closeTab(tab);
+    if (ctrl && e.shiftKey && isKey('e')) return stop(), toggleFilePanel();
     if (ctrl && e.key === 'Tab') {
       stop();
       if (!state.tabs.length) return;
@@ -563,16 +633,21 @@ window.addEventListener(
     if (ctrl && e.key === '-') return stop(), setFontSize(state.settings.fontSize - 1);
     if (ctrl && e.key === '0') return stop(), setFontSize(14);
 
-    if (!tab || !e.target.closest?.('.xterm')) return;
-    if (ctrl && key === 'c' && (e.shiftKey || tab.term.hasSelection())) {
+    // only step aside for the app's own inputs; xterm's hidden textarea is not one of them
+    if (!tab || e.target.closest?.('input, select, textarea:not(.xterm-helper-textarea)')) return;
+    if (ctrl && isKey('c') && (e.shiftKey || tab.term.hasSelection())) {
       stop();
-      if (tab.term.hasSelection()) {
-        deck.clipWrite(tab.term.getSelection());
-        tab.term.clearSelection();
-      }
+      copyFromTab(tab);
       return;
     }
-    if (ctrl && key === 'v') return stop(), pasteInto(tab);
+    if (ctrl && e.key === 'Insert') return stop(), copyFromTab(tab);
+    if ((ctrl && isKey('v')) || (e.shiftKey && e.key === 'Insert')) {
+      // with the terminal focused the browser fires a paste event, which carries images too
+      if (e.target.closest?.('.xterm')) return;
+      stop();
+      pasteInto(tab);
+      return;
+    }
     // Ctrl+Enter / Shift+Enter → newline in Claude's prompt. xterm sends a plain CR (submit) for both;
     // Windows Terminal sends LF (Ctrl+J), which Claude treats as "insert newline".
     if ((e.ctrlKey || e.shiftKey) && !e.altKey && !e.metaKey && e.key === 'Enter') {
@@ -1574,6 +1649,7 @@ function settingsModal() {
   const progs = h('textarea', { rows: 4, spellcheck: 'false' });
   progs.value = programs().join('\n');
   const notify = h('input', { type: 'checkbox', checked: s.notify });
+  const copySel = h('input', { type: 'checkbox', checked: s.copyOnSelect });
   const m = openModal({
     title: '설정',
     body: h('div', {},
@@ -1581,6 +1657,7 @@ function settingsModal() {
       h('div', { class: 'field' }, h('label', {}, '로컬 세션 셸'), shellSel, h('div', { class: 'hint' }, '다음에 여는 로컬 세션부터 적용됩니다.')),
       h('div', { class: 'field' }, h('label', {}, '실행 프로그램'), progs,
         h('div', { class: 'hint' }, '한 줄에 하나씩 적습니다. 새 세션 창과 탭 메뉴의 "실행 프로그램 변경"에 나옵니다. 예: claude, claude-glm')),
+      h('label', { class: 'check' }, copySel, '마우스로 선택하면 바로 복사 (Ctrl+C 없이)'),
       h('label', { class: 'check' }, notify, '창이 백그라운드일 때 Claude 응답 완료를 Windows 알림으로 받기')),
     actions: [
       { label: '취소', onClick: () => m.close() },
@@ -1589,7 +1666,7 @@ function settingsModal() {
         primary: true,
         onClick: () => {
           const list = progs.value.split('\n').map((x) => x.trim()).filter(Boolean);
-          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, programs: list.length ? list : ['claude'] };
+          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, copyOnSelect: copySel.checked, programs: list.length ? list : ['claude'] };
           setFontSize(parseInt(font.value, 10) || 14);
           m.close();
         },
