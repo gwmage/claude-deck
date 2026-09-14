@@ -15,6 +15,7 @@ const AGENT_PIPE = '\\\\.\\pipe\\openssh-ssh-agent';
 
 let win = null;
 let forceQuit = false;
+let SEED_CONFIG = null; // set for a secondary instance on its first run
 
 // ───────────────────────── config ─────────────────────────
 const DEFAULT_CONFIG = {
@@ -31,7 +32,18 @@ const configPath = () => path.join(app.getPath('userData'), 'config.json');
 
 function loadConfig() {
   try {
-    const loaded = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+    let raw;
+    try {
+      raw = fs.readFileSync(configPath(), 'utf8');
+    } catch (err) {
+      if (!SEED_CONFIG) throw err;
+      // first run of a secondary instance: take servers, favorites, programs and trusted keys, not tabs
+      const seed = JSON.parse(fs.readFileSync(SEED_CONFIG, 'utf8'));
+      delete seed.tabs;
+      delete seed.activeTab;
+      raw = JSON.stringify(seed);
+    }
+    const loaded = JSON.parse(raw);
     config = {
       ...structuredClone(DEFAULT_CONFIG),
       ...loaded,
@@ -813,6 +825,12 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  if (INSTANCE) {
+    win.on('page-title-updated', (e, title) => {
+      e.preventDefault();
+      win.setTitle(title.replace('Claude Deck', `Claude Deck ${INSTANCE}`));
+    });
+  }
   // self-test hooks: DECK_EVAL runs JS in the renderer, DECK_SHOT saves a screenshot
   // DECK_KEYTEST=<ms>: after load, send a real Ctrl+V through Chromium's input pipeline
   if (process.env.DECK_KEYTEST) {
@@ -858,8 +876,17 @@ function createWindow() {
   });
 }
 
-// self-test: run an isolated instance next to the real one
-if (process.env.DECK_USERDATA) app.setPath('userData', process.env.DECK_USERDATA);
+// Secondary instance: `electron . --instance=2` gets its own profile folder, so it runs next to the
+// main window (the single-instance lock is per profile) and seeds its config from the main one.
+const instanceArg = process.argv.find((a) => a.startsWith('--instance='));
+const INSTANCE = (instanceArg ? instanceArg.slice('--instance='.length) : '').replace(/[^\w-]/g, '');
+if (process.env.DECK_USERDATA) {
+  app.setPath('userData', process.env.DECK_USERDATA); // self-test: isolated instance
+} else if (INSTANCE) {
+  const primary = app.getPath('userData');
+  app.setPath('userData', path.join(path.dirname(primary), `claude-deck-${INSTANCE}`));
+  SEED_CONFIG = path.join(primary, 'config.json');
+}
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
