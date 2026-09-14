@@ -692,26 +692,24 @@ ipcMain.handle('fs:upload', async (_e, { hostId, files }) => {
 });
 
 // ───────────────────────── clipboard ─────────────────────────
-// This Electron build exposes only clear/has/read/readText/write/writeText on clipboard:
-// there is no readImage/readBuffer, so images arrive from the renderer's paste event instead.
-function clipboardFiles() {
+// In this Electron build the clipboard calls are asynchronous (readText() returns a Promise) and there is
+// no readImage/readBuffer. Every call is awaited; returning an unresolved Promise over IPC hangs the caller.
+async function clipboardFiles() {
   try {
-    if (typeof clipboard.has !== 'function' || !clipboard.has('FileNameW')) return [];
-    const raw = (clipboard.read('FileNameW') || '').split(String.fromCharCode(0)).join('').trim();
+    if (typeof clipboard.has !== 'function' || !(await clipboard.has('FileNameW'))) return [];
+    const raw = String((await clipboard.read('FileNameW')) || '').split(String.fromCharCode(0)).join('').trim();
     return raw && fs.existsSync(raw) ? [raw] : [];
   } catch {
     return [];
   }
 }
-ipcMain.handle('clip:read', () => {
-  const safe = (fn, dflt) => {
-    try {
-      return fn();
-    } catch {
-      return dflt;
-    }
-  };
-  return { text: safe(() => clipboard.readText(), ''), files: safe(clipboardFiles, []) };
+ipcMain.handle('clip:read', async () => {
+  let text = '';
+  try {
+    const v = await clipboard.readText();
+    text = typeof v === 'string' ? v : '';
+  } catch {}
+  return { text, files: await clipboardFiles() };
 });
 // bytes come from the renderer (paste event or drag payload); saved locally, uploaded when the tab is remote
 ipcMain.handle('clip:saveImage', async (_e, { hostId, bytes, ext }) => {
@@ -727,8 +725,8 @@ ipcMain.handle('clip:saveImage', async (_e, { hostId, bytes, ext }) => {
 ipcMain.handle('clip:pasteCommand', () => {
   win?.webContents.paste();
 });
-ipcMain.handle('clip:write', (_e, text) => {
-  clipboard.writeText(text);
+ipcMain.handle('clip:write', async (_e, text) => {
+  await clipboard.writeText(String(text ?? ''));
   return true;
 });
 
@@ -803,6 +801,7 @@ function createWindow() {
     minHeight: 500,
     backgroundColor: '#131418',
     title: 'Claude Deck',
+    show: !process.env.DECK_HIDDEN,
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
@@ -815,6 +814,16 @@ function createWindow() {
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // self-test hooks: DECK_EVAL runs JS in the renderer, DECK_SHOT saves a screenshot
+  // DECK_KEYTEST=<ms>: after load, send a real Ctrl+V through Chromium's input pipeline
+  if (process.env.DECK_KEYTEST) {
+    win.webContents.once('did-finish-load', () => {
+      setTimeout(() => {
+        win.webContents.focus();
+        for (const type of ['keyDown', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: 'V', modifiers: ['control'] });
+        console.log('KEYTEST_SENT');
+      }, Number(process.env.DECK_KEYTEST));
+    });
+  }
   if (process.env.DECK_EVAL || process.env.DECK_SHOT) {
     win.webContents.once('did-finish-load', async () => {
       if (process.env.DECK_EVAL) win.webContents.executeJavaScript(`${process.env.DECK_EVAL};void 0`).catch((e) => console.error(e));
