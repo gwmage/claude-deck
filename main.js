@@ -25,7 +25,7 @@ const DEFAULT_CONFIG = {
   tabs: [],
   activeTab: null,
   knownHosts: {},
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false },
 };
 let config = structuredClone(DEFAULT_CONFIG);
 const configPath = () => path.join(app.getPath('userData'), 'config.json');
@@ -832,6 +832,27 @@ function createWindow() {
     });
   }
   // self-test hooks: DECK_EVAL runs JS in the renderer, DECK_SHOT saves a screenshot
+  // DECK_MOUSETEST=<ms>: after load, send a real left-button drag through Chromium's input pipeline
+  if (process.env.DECK_MOUSETEST) {
+    win.webContents.once('did-finish-load', () => {
+      setTimeout(() => {
+        win.webContents.focus();
+        const at = (type, x, y, extra = {}) => win.webContents.sendInputEvent({ type, x, y, button: 'left', clickCount: 1, ...extra });
+        let step = 0;
+        const rows = [70, 100, 130, 160, 190, 220];
+        const one = () => {
+          const y = rows[step++];
+          if (y === undefined) return console.log('MOUSETEST_SENT');
+          at('mouseMove', 340, y);
+          at('mouseDown', 340, y);
+          for (let x = 400; x <= 1000; x += 75) at('mouseMove', x, y, { button: 'left' });
+          at('mouseUp', 1000, y);
+          setTimeout(one, 400);
+        };
+        one();
+      }, Number(process.env.DECK_MOUSETEST));
+    });
+  }
   // DECK_KEYTEST=<ms>: after load, send a real Ctrl+V through Chromium's input pipeline
   if (process.env.DECK_KEYTEST) {
     win.webContents.once('did-finish-load', () => {

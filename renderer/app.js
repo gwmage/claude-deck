@@ -34,7 +34,7 @@ const state = {
   hosts: [],
   tabs: [],
   activeId: null,
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false },
   favorites: [],
   recentPaths: {},
   filePanel: { open: false, mode: 'recent' },
@@ -49,6 +49,23 @@ const MODES = [
   { flag: '--continue', label: '마지막 대화 이어서 (--continue)' },
   { flag: '--resume', label: '대화 골라서 재개 (--resume)' },
 ];
+
+// Claude Code and tmux ask the terminal for full mouse reporting, and then a drag pans their UI instead
+// of selecting text. Unless the user hands the mouse over, drop those requests before xterm sees them.
+const MOUSE_MODE_RE = /[?(?:1000|1001|1002|1003|1005|1006|1015|1016)[hl]/g;
+const PARTIAL_ESC_RE = /(?:[??[0-9;]*)?$/;
+const MOUSE_OFF = '[?1000l[?1002l[?1003l[?1006l';
+function filterMouseModes(tab, data) {
+  if (state.settings.appMouse) return data;
+  data = (tab.escTail || '') + data;
+  tab.escTail = '';
+  const partial = data.match(PARTIAL_ESC_RE); // an escape sequence split across chunks: hold it back
+  if (partial) {
+    tab.escTail = partial[0];
+    data = data.slice(0, data.length - partial[0].length);
+  }
+  return data.replace(MOUSE_MODE_RE, '');
+}
 
 const THEME = {
   background: '#16171c',
@@ -365,7 +382,7 @@ function hideOverlay(tab) {
 deck.onData((id, data) => {
   const tab = tabById(id);
   if (!tab) return;
-  tab.term.write(data);
+  tab.term.write(filterMouseModes(tab, data));
   const now = Date.now();
   if (!tab.busy) {
     tab.busy = true;
@@ -1665,6 +1682,7 @@ function settingsModal() {
   progs.value = programs().join('\n');
   const notify = h('input', { type: 'checkbox', checked: s.notify });
   const copySel = h('input', { type: 'checkbox', checked: s.copyOnSelect });
+  const appMouse = h('input', { type: 'checkbox', checked: s.appMouse });
   const m = openModal({
     title: '설정',
     body: h('div', {},
@@ -1673,6 +1691,7 @@ function settingsModal() {
       h('div', { class: 'field' }, h('label', {}, '실행 프로그램'), progs,
         h('div', { class: 'hint' }, '한 줄에 하나씩 적습니다. 새 세션 창과 탭 메뉴의 "실행 프로그램 변경"에 나옵니다. 예: claude, claude-glm')),
       h('label', { class: 'check' }, copySel, '마우스로 선택하면 바로 복사 (Ctrl+C 없이)'),
+      h('label', { class: 'check' }, appMouse, '터미널 앱에 마우스 넘기기 (Claude 클릭·휠을 쓰는 대신, 드래그 선택은 Shift 필요)'),
       h('label', { class: 'check' }, notify, '창이 백그라운드일 때 Claude 응답 완료를 Windows 알림으로 받기')),
     actions: [
       { label: '취소', onClick: () => m.close() },
@@ -1681,7 +1700,8 @@ function settingsModal() {
         primary: true,
         onClick: () => {
           const list = progs.value.split('\n').map((x) => x.trim()).filter(Boolean);
-          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, copyOnSelect: copySel.checked, programs: list.length ? list : ['claude'] };
+          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, copyOnSelect: copySel.checked, appMouse: appMouse.checked, programs: list.length ? list : ['claude'] };
+          if (!appMouse.checked) for (const t of state.tabs) t.term.write(MOUSE_OFF); // release a mouse grab already in effect
           setFontSize(parseInt(font.value, 10) || 14);
           m.close();
         },
