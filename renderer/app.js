@@ -66,7 +66,38 @@ function filterMouseModes(tab, data) {
     tab.escTail = partial[0];
     data = data.slice(0, data.length - partial[0].length);
   }
-  return data.replace(MOUSE_MODE_RE, '');
+  return data.replace(MOUSE_MODE_RE, (seq) => {
+    const on = seq.endsWith('h');
+    if (/100[0123]/.test(seq)) tab.mouseWanted = on; // the app wants mouse reports; we answer only for the wheel
+    if (/1006/.test(seq)) tab.mouseSgr = on;
+    return '';
+  });
+}
+
+// The app (Claude Code, tmux) scrolls its own view from wheel reports. We keep button events for text
+// selection, but hand the wheel over, so scrolling moves the conversation instead of the input history.
+function forwardWheel(tab, ev) {
+  const screen = tab.term.element && tab.term.element.querySelector('.xterm-screen');
+  if (!screen || tab.status !== 'running') return false;
+  const rect = screen.getBoundingClientRect();
+  if (!rect.width || !rect.height) return false;
+  const col = Math.min(tab.term.cols, Math.max(1, Math.floor(((ev.clientX - rect.left) / rect.width) * tab.term.cols) + 1));
+  const row = Math.min(tab.term.rows, Math.max(1, Math.floor(((ev.clientY - rect.top) / rect.height) * tab.term.rows) + 1));
+  deck.input(tab.id, wheelReport(tab.mouseSgr, ev.deltaY, ev.deltaMode, col, row));
+  return true;
+}
+
+function wheelReport(sgr, deltaY, deltaMode, col, row) {
+  const button = deltaY < 0 ? 64 : 65; // 64 = wheel up, 65 = wheel down
+  const lines = deltaMode === 1 ? Math.abs(deltaY) : Math.abs(deltaY) / 30;
+  const count = Math.max(1, Math.min(10, Math.round(lines)));
+  let out = '';
+  for (let i = 0; i < count; i++) {
+    out += sgr
+      ? ESC + '[<' + button + ';' + col + ';' + row + 'M'
+      : ESC + '[M' + String.fromCharCode(32 + button, 32 + col, 32 + row);
+  }
+  return out;
 }
 
 const THEME = {
@@ -178,6 +209,10 @@ function createTab(opts, { activate: doActivate = true } = {}) {
     tab.title = /[\\/]|\.exe\b/i.test(t) ? '' : t.replace(/^[^\p{L}\p{N}]+/u, '').trim();
     renderTabs();
     if (tab.id === state.activeId) updateTopbar();
+  });
+  term.attachCustomWheelEventHandler((ev) => {
+    if (state.settings.appMouse || !tab.mouseWanted) return true; // let xterm scroll its own buffer
+    return !forwardWheel(tab, ev);
   });
   term.onBell(() => flagAttention(tab, '벨'));
   term.onSelectionChange(() => {
