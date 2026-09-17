@@ -52,9 +52,11 @@ const MODES = [
 
 // Claude Code and tmux ask the terminal for full mouse reporting, and then a drag pans their UI instead
 // of selecting text. Unless the user hands the mouse over, drop those requests before xterm sees them.
-const MOUSE_MODE_RE = /[?(?:1000|1001|1002|1003|1005|1006|1015|1016)[hl]/g;
-const PARTIAL_ESC_RE = /(?:[??[0-9;]*)?$/;
-const MOUSE_OFF = '[?1000l[?1002l[?1003l[?1006l';
+const ESC = String.fromCharCode(27);
+// built without backslash escapes on purpose: [[] is a literal '[', [?] a literal '?'
+const MOUSE_MODE_RE = new RegExp(ESC + '[[][?](?:1000|1001|1002|1003|1005|1006|1015|1016)[hl]', 'g');
+const PARTIAL_ESC_RE = new RegExp(ESC + '(?:[[][?]?[0-9;]*)?$');
+const MOUSE_OFF = ESC + '[?1000l' + ESC + '[?1002l' + ESC + '[?1003l' + ESC + '[?1006l';
 function filterMouseModes(tab, data) {
   if (state.settings.appMouse) return data;
   data = (tab.escTail || '') + data;
