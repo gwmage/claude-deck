@@ -195,8 +195,9 @@ kbd {
 .fp-tabs { display: flex; gap: 2px; }
 .fp-tabs button { border: 0; background: none; color: var(--muted); padding: 5px 10px; border-radius: 6px; }
 .fp-tabs button.active { background: var(--panel-2); color: var(--text); }
-#fp-refresh { border: 0; background: none; color: var(--muted); padding: 4px 8px; border-radius: 6px; }
-#fp-refresh:hover { background: #ffffff0a; color: var(--text); }
+.fp-actions { display: flex; gap: 2px; }
+#fp-refresh, #fp-close { border: 0; background: none; color: var(--muted); padding: 4px 8px; border-radius: 6px; }
+#fp-refresh:hover, #fp-close:hover { background: #ffffff0a; color: var(--text); }
 #fp-path { padding: 8px 12px; font-size: 11.5px; color: var(--muted); border-bottom: 1px solid var(--line); font-family: 'Cascadia Mono', Consolas, monospace; word-break: break-all; display: flex; gap: 6px; align-items: center; }
 #fp-path .up { border: 1px solid var(--line); background: var(--panel-2); border-radius: 5px; padding: 0 6px; color: var(--text); flex: none; }
 #fp-list { flex: 1; overflow-y: auto; padding: 4px; }

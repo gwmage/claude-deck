@@ -942,6 +942,10 @@ $('#fp-refresh').addEventListener('click', () => {
   if (state.filePanel.mode === 'recent') pollRecent(true);
   else loadBrowse(tab, tab.browsePath || tab.cwd);
 });
+$('#fp-close').addEventListener('click', () => {
+  state.filePanel.open = false;
+  renderFilePanel();
+});
 
 function renderFilePanel() {
   const fp = $('#filepanel');
