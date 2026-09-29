@@ -307,21 +307,44 @@ function getConn(hostId) {
   return entry.ready;
 }
 
-async function getSftp(hostId) {
+// The cached connection above can go dead silently (sleep/wake, VPN flap, NAT idle
+// timeout) before ssh2's keepalive notices — the next channel open on it then fails
+// with "Channel open failure". Detect that and drop the stale entry so callers retry
+// once against a fresh connection instead of failing outright.
+function isStaleChannelError(err) {
+  return !!err && /channel open failure/i.test(String(err.message || err));
+}
+
+function dropConn(hostId, entry) {
+  if (conns.get(hostId) === entry) {
+    conns.delete(hostId);
+    try {
+      entry.client.end();
+    } catch {}
+  }
+}
+
+function openSftp(entry) {
+  return new Promise((resolve, reject) =>
+    entry.client.sftp((err, s) => {
+      if (err) return reject(err);
+      s.on('close', () => {
+        entry.sftp = null;
+      });
+      resolve(s);
+    })
+  );
+}
+
+async function getSftp(hostId, retried) {
   const entry = await getConn(hostId);
   if (!entry.sftp) {
-    entry.sftp = new Promise((resolve, reject) =>
-      entry.client.sftp((err, s) => {
-        if (err) {
-          entry.sftp = null;
-          return reject(err);
-        }
-        s.on('close', () => {
-          entry.sftp = null;
-        });
-        resolve(s);
-      })
-    );
+    entry.sftp = openSftp(entry).catch(async (err) => {
+      entry.sftp = null;
+      if (retried || !isStaleChannelError(err)) throw err;
+      dropConn(hostId, entry);
+      return getSftp(hostId, true);
+    });
   }
   return entry.sftp;
 }
@@ -351,7 +374,7 @@ function resolveLocal(p, base) {
   return path.normalize(p);
 }
 
-function remoteExec(entry, cmd) {
+function execOnce(entry, cmd) {
   return new Promise((resolve, reject) =>
     entry.client.exec(cmd, (err, stream) => {
       if (err) return reject(err);
@@ -361,6 +384,17 @@ function remoteExec(entry, cmd) {
       stream.on('close', (code) => resolve({ code, out: Buffer.concat(chunks).toString('utf8') }));
     })
   );
+}
+
+async function remoteExec(hostId, cmd, retried) {
+  const entry = await getConn(hostId);
+  try {
+    return await execOnce(entry, cmd);
+  } catch (err) {
+    if (retried || !isStaleChannelError(err)) throw err;
+    dropConn(hostId, entry);
+    return remoteExec(hostId, cmd, true);
+  }
 }
 
 function shq(p) {
@@ -474,8 +508,14 @@ function buildRemoteLine(dir, command, tmux) {
   );
 }
 
+function openShell(entry, cols, rows) {
+  return new Promise((resolve, reject) =>
+    entry.client.shell({ term: 'xterm-256color', cols, rows }, (err, st) => (err ? reject(err) : resolve(st)))
+  );
+}
+
 async function startRemote({ id, hostId, cwd, command, cols, rows, tmux }) {
-  const entry = await getConn(hostId);
+  let entry = await getConn(hostId);
   let dir = null;
   if (cwd) {
     dir = await resolveRemote(hostId, cwd);
@@ -487,9 +527,15 @@ async function startRemote({ id, hostId, cwd, command, cols, rows, tmux }) {
     }
     if (!isDirMode(st.mode)) throw new Error(`폴더가 아닙니다: ${dir}`);
   }
-  const stream = await new Promise((resolve, reject) =>
-    entry.client.shell({ term: 'xterm-256color', cols, rows }, (err, st) => (err ? reject(err) : resolve(st)))
-  );
+  let stream;
+  try {
+    stream = await openShell(entry, cols, rows);
+  } catch (err) {
+    if (!isStaleChannelError(err)) throw err;
+    dropConn(hostId, entry);
+    entry = await getConn(hostId);
+    stream = await openShell(entry, cols, rows);
+  }
   const s = { kind: 'ssh', stream, hostId, killed: false };
   sessions.set(id, s);
   const dec = new StringDecoder('utf8');
@@ -507,9 +553,8 @@ async function startRemote({ id, hostId, cwd, command, cols, rows, tmux }) {
 }
 
 ipcMain.handle('tmux:list', async (_e, hostId) => {
-  const entry = await getConn(hostId);
   const { out } = await remoteExec(
-    entry,
+    hostId,
     "tmux list-sessions -F '#{session_name}\t#{session_created}\t#{session_attached}\t#{pane_current_path}' 2>/dev/null"
   );
   return out
@@ -522,8 +567,7 @@ ipcMain.handle('tmux:list', async (_e, hostId) => {
 });
 ipcMain.handle('tmux:kill', async (_e, { hostId, name }) => {
   if (!TMUX_NAME_RE.test(name)) throw new Error(`잘못된 세션 이름: ${name}`);
-  const entry = await getConn(hostId);
-  await remoteExec(entry, `tmux kill-session -t ${shq('=' + name)} 2>/dev/null`);
+  await remoteExec(hostId, `tmux kill-session -t ${shq('=' + name)} 2>/dev/null`);
 });
 
 function killSession(id) {
@@ -633,14 +677,13 @@ async function localRecent(root, sinceMs) {
 
 ipcMain.handle('fs:recent', async (_e, { hostId, dir, sinceMs }) => {
   if (hostId === 'local') return localRecent(resolveLocal(dir), sinceMs);
-  const entry = await getConn(hostId);
   const p = await resolveRemote(hostId, dir);
   const minutes = Math.max(1, Math.ceil((Date.now() - sinceMs) / 60000) + 1);
   const prune = PRUNE.map((n) => `-name ${shq(n)}`).join(' -o ');
   const cmd =
     `cd ${shq(p)} 2>/dev/null && find . -maxdepth 5 \\( ${prune} \\) -prune -o -type f -mmin -${minutes} ` +
     `-printf '%T@\\t%s\\t%p\\n' 2>/dev/null | sort -rn | head -200`;
-  const { out } = await remoteExec(entry, cmd);
+  const { out } = await remoteExec(hostId, cmd);
   return out
     .split('\n')
     .filter(Boolean)
