@@ -83,14 +83,23 @@ function forwardWheel(tab, ev) {
   if (!rect.width || !rect.height) return false;
   const col = Math.min(tab.term.cols, Math.max(1, Math.floor(((ev.clientX - rect.left) / rect.width) * tab.term.cols) + 1));
   const row = Math.min(tab.term.rows, Math.max(1, Math.floor(((ev.clientY - rect.top) / rect.height) * tab.term.rows) + 1));
-  deck.input(tab.id, wheelReport(tab.mouseSgr, ev.deltaY, ev.deltaMode, col, row));
+  const report = wheelReport(tab, tab.mouseSgr, ev.deltaY, ev.deltaMode, col, row);
+  if (report) deck.input(tab.id, report);
   return true;
 }
 
-function wheelReport(sgr, deltaY, deltaMode, col, row) {
+// A trackpad or a "smooth scroll" mouse fires many wheel events per gesture, each with a small
+// deltaY. Flooring every single one up to at least 1 line (as a plain mouse's one notch would need)
+// made scrolling wildly fast on those devices. Instead accumulate fractional lines per tab and only
+// emit once they add up to a whole line, so a precision device scrolls proportionally to its input.
+function wheelReport(tab, sgr, deltaY, deltaMode, col, row) {
   const button = deltaY < 0 ? 64 : 65; // 64 = wheel up, 65 = wheel down
-  const lines = deltaMode === 1 ? Math.abs(deltaY) : Math.abs(deltaY) / 30;
-  const count = Math.max(1, Math.min(10, Math.round(lines)));
+  const dir = deltaY < 0 ? -1 : 1;
+  if (tab.wheelDir !== dir) tab.wheelRemainder = 0; // direction flipped: drop the stale carry
+  tab.wheelDir = dir;
+  const lines = (tab.wheelRemainder || 0) + (deltaMode === 1 ? Math.abs(deltaY) : Math.abs(deltaY) / 30);
+  const count = Math.min(5, Math.floor(lines));
+  tab.wheelRemainder = lines - count;
   let out = '';
   for (let i = 0; i < count; i++) {
     out += sgr
