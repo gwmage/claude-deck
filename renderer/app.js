@@ -1,5 +1,5 @@
 'use strict';
-/* global Terminal, FitAddon, Unicode11Addon, WebLinksAddon, WebglAddon, marked, deck */
+/* global Terminal, FitAddon, Unicode11Addon, WebLinksAddon, marked, deck */
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, el = document) => el.querySelector(s);
@@ -193,11 +193,8 @@ function createTab(opts, { activate: doActivate = true } = {}) {
   state.tabs.push(tab);
   if (doActivate) setActive(tab.id);
   term.open(host);
-  try {
-    const gl = new WebglAddon.WebglAddon();
-    gl.onContextLoss(() => gl.dispose());
-    term.loadAddon(gl);
-  } catch {}
+  // WebGL 렌더러(GPU 가속)는 장시간 켜두면 글리프 아틀라스가 오염돼 글자가 픽셀 단위로 깨지는
+  // xterm.js의 알려진 문제가 있어 끄고 기본(캔버스) 렌더러를 쓴다.
   registerFileLinks(tab);
 
   term.onData((d) => {
