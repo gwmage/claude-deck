@@ -1,5 +1,5 @@
 'use strict';
-/* global Terminal, FitAddon, Unicode11Addon, WebLinksAddon, marked, deck */
+/* global Terminal, FitAddon, Unicode11Addon, marked, deck */
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, el = document) => el.querySelector(s);
@@ -195,7 +195,6 @@ function createTab(opts, { activate: doActivate = true } = {}) {
   term.loadAddon(fit);
   term.loadAddon(new Unicode11Addon.Unicode11Addon());
   term.unicode.activeVersion = '11';
-  term.loadAddon(new WebLinksAddon.WebLinksAddon((_e, uri) => deck.openUrl(uri)));
   tab.term = term;
   tab.fit = fit;
 
@@ -477,53 +476,120 @@ const KNOWN_EXT = new Set(
 );
 const PATH_RE = /(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|[\\/])?(?:[\w.@+\-가-힣]+[\\/])*[\w@+\-가-힣][\w.@+\-가-힣]*\.[A-Za-z0-9]{1,8}(?![\w가-힣])/g;
 
+const URL_RE = /https?:\/\/[^\s"'!*(){}|\\^<>`]*[^\s"':,.!?{}|\\^~[\]`()<>]/gi;
+const BOX_RE = /[─-╿]/;
+const SOFT_WRAP_SLACK = 3;
+const MAX_LINK_ROWS = 30;
+
+// The text of the logical line that buffer row `y` (1-based) belongs to, plus the cell each character sits in.
+// isWrapped is not reliable: ConPTY re-emits a wrapped line as separate rows, and apps like Claude break long
+// tokens themselves and indent the continuation. So a row filled to the right edge is treated as continuing.
+function logicalLine(term, y) {
+  const buf = term.buffer.active;
+  const nc = buf.getNullCell();
+  const cache = new Map();
+  const read = (row) => {
+    if (cache.has(row)) return cache.get(row);
+    const line = row >= 0 ? buf.getLine(row) : undefined;
+    let info = null;
+    if (line) {
+      info = { cells: [], first: -1, last: -1, endCol: 0, wrapped: line.isWrapped };
+      for (let x = 0; x < line.length; x++) {
+        const cell = line.getCell(x, nc);
+        if (!cell) continue;
+        const w = cell.getWidth();
+        if (w === 0) continue;
+        const ch = cell.getChars() || ' ';
+        info.cells.push({ ch, x: x + 1, w });
+        if (ch !== ' ') {
+          if (info.first < 0) info.first = info.cells.length - 1;
+          info.last = info.cells.length - 1;
+          info.endCol = x + w;
+        }
+      }
+    }
+    cache.set(row, info);
+    return info;
+  };
+  // a hard break lands exactly on the wrap width, so a row shorter than its neighbours was broken at a space instead
+  const filled = (row) => {
+    const a = read(row);
+    if (!a || a.last < 0 || a.endCol < term.cols - SOFT_WRAP_SLACK || BOX_RE.test(a.cells[a.last].ch)) return false;
+    for (let r = row - 2; r <= row + 2; r++) {
+      const n = read(r);
+      if (n && n.last >= 0 && n.endCol > a.endCol && !BOX_RE.test(n.cells[n.last].ch)) return false;
+    }
+    return true;
+  };
+  // 'hard' = terminal wrap, 'soft' = app wrap, false = separate lines
+  const joins = (row) => {
+    const b = read(row + 1);
+    if (!b) return false;
+    if (b.wrapped) return 'hard';
+    return b.first >= 0 && !BOX_RE.test(b.cells[b.first].ch) && filled(row) ? 'soft' : false;
+  };
+
+  let start = y - 1;
+  let end = y - 1;
+  while (start > 0 && y - 1 - start <= MAX_LINK_ROWS && joins(start - 1)) start--;
+  while (end - (y - 1) <= MAX_LINK_ROWS && joins(end)) end++;
+  if (end - start > MAX_LINK_ROWS) return null;
+
+  let text = '';
+  const pos = [];
+  for (let row = start; row <= end; row++) {
+    const info = read(row);
+    if (!info) continue;
+    // a deeper indent is the app's continuation indent; a single leading space is a real one the wrap landed on
+    const from = row > start && joins(row - 1) === 'soft' && info.first !== 1 ? info.first : 0;
+    const to = row < end && joins(row) === 'soft' ? info.last : info.cells.length - 1;
+    for (let i = from; i <= to; i++) {
+      const c = info.cells[i];
+      for (let k = 0; k < c.ch.length; k++) pos.push({ x: c.x, y: row + 1, w: c.w });
+      text += c.ch;
+    }
+  }
+  return { text, pos };
+}
+
 function registerFileLinks(tab) {
   const term = tab.term;
   term.registerLinkProvider({
     provideLinks(y, callback) {
-      const buf = term.buffer.active;
-      let start = y - 1;
-      let end = y - 1;
-      while (start > 0 && buf.getLine(start)?.isWrapped) start--;
-      while (buf.getLine(end + 1)?.isWrapped) end++;
-      if (end - start > 30) return callback(undefined);
-      let text = '';
-      const pos = [];
-      const nc = buf.getNullCell();
-      for (let row = start; row <= end; row++) {
-        const line = buf.getLine(row);
-        if (!line) continue;
-        for (let x = 0; x < line.length; x++) {
-          const cell = line.getCell(x, nc);
-          if (!cell) continue;
-          const w = cell.getWidth();
-          if (w === 0) continue;
-          const ch = cell.getChars() || ' ';
-          for (let k = 0; k < ch.length; k++) pos.push({ x: x + 1, y: row + 1, w });
-          text += ch;
-        }
-      }
+      const line = logicalLine(term, y);
+      if (!line) return callback(undefined);
+      const { text, pos } = line;
       const links = [];
-      PATH_RE.lastIndex = 0;
+      const add = (idx, s, activate) => {
+        const a = pos[idx];
+        const b = pos[idx + s.length - 1];
+        if (!a || !b) return;
+        links.push({
+          range: { start: { x: a.x, y: a.y }, end: { x: b.x + b.w - 1, y: b.y } },
+          text: s,
+          decorations: { pointerCursor: true, underline: true },
+          activate,
+        });
+      };
+      const urls = [];
       let m;
+      URL_RE.lastIndex = 0;
+      while ((m = URL_RE.exec(text))) {
+        urls.push([m.index, m.index + m[0].length]);
+        add(m.index, m[0], (_ev, t) => deck.openUrl(t));
+      }
+      PATH_RE.lastIndex = 0;
       while ((m = PATH_RE.exec(text))) {
         const s = m[0];
         const idx = m.index;
+        if (urls.some(([a, b]) => idx < b && idx + s.length > a)) continue;
         const prev = text[idx - 1] || ' ';
         if (/[:/\\\w.]/.test(prev)) continue;
         const ext = s.split('.').pop().toLowerCase();
         const hasSep = /[\\/]/.test(s);
         if (!/[a-z]/i.test(ext)) continue;
         if (!KNOWN_EXT.has(ext) && (!hasSep || /^[\w-]+\.(com|net|org|io|ai|kr|dev|app|co)\b/i.test(s))) continue;
-        const a = pos[idx];
-        const b = pos[idx + s.length - 1];
-        if (!a || !b) continue;
-        links.push({
-          range: { start: { x: a.x, y: a.y }, end: { x: b.x + b.w - 1, y: b.y } },
-          text: s,
-          decorations: { pointerCursor: true, underline: true },
-          activate: (_ev, t) => openFile(tab, t),
-        });
+        add(idx, s, (_ev, t) => openFile(tab, t));
       }
       callback(links.length ? links : undefined);
     },
