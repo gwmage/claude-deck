@@ -144,6 +144,15 @@ function freshCommand(tab) {
   if (!isAgent(tab)) return tab.command;
   return tab.program + tab.command.slice(tab.program.length).replace(FLAG_RE, '');
 }
+// Headroom (context-compression proxy): `headroom wrap <tool> -- <tool args>` starts the proxy and runs the
+// tool through it. tab.command stays unwrapped so flag handling above is unchanged; the wrap is added at launch.
+const HEADROOM_TOOLS = new Set(['claude', 'codex', 'grok', 'copilot', 'aider', 'opencode', 'cline', 'continue', 'goose', 'openhands', 'openclaw', 'vibe', 'omp', 'zcode']);
+const headroomOn = (tab) => !!tab.headroom && HEADROOM_TOOLS.has(tab.program);
+function launchCommand(tab, command) {
+  if (!headroomOn(tab) || !(command === tab.program || command.startsWith(tab.program + ' '))) return command;
+  const rest = command.slice(tab.program.length);
+  return `headroom wrap ${tab.program}${rest ? ' --' + rest : ''}`;
+}
 
 // ───────────────────────── terminal tabs ─────────────────────────
 function defaultName(hostId, cwd) {
@@ -164,6 +173,7 @@ function createTab(opts, { activate: doActivate = true } = {}) {
     command: opts.command ?? 'claude',
     program: opts.program !== undefined ? opts.program : inferProgram(opts.command ?? 'claude'),
     tmux: opts.tmux || null,
+    headroom: !!opts.headroom,
     status: 'new',
     title: '',
     attention: false,
@@ -288,7 +298,7 @@ async function startTab(tab, command = tab.command) {
       id: tab.id,
       hostId: tab.hostId,
       cwd: tab.cwd,
-      command,
+      command: launchCommand(tab, command),
       tmux: tab.tmux,
       cols: tab.term.cols,
       rows: tab.term.rows,
@@ -327,6 +337,24 @@ async function convertToKeep(t) {
   persistTabs();
   renderTabs();
   restartTab(t, continueCommand(t), { keepServerSession: true });
+}
+
+// turn the Headroom wrap on or off for a tab: the program has to be relaunched, so the conversation is continued
+async function toggleHeadroom(t) {
+  const on = !t.headroom;
+  const ok = await confirmModal({
+    title: on ? 'Headroom 적용' : 'Headroom 해제',
+    message:
+      '"' + t.name + '" 세션을 ' + (on ? 'Headroom 프록시를 거치도록' : 'Headroom 없이') + ' 다시 시작합니다.\n' +
+      '대화 내용은 이어지지만, 지금 진행 중인 응답은 한 번 끊깁니다.' +
+      (on ? '\n' + (isRemote(t) ? '서버' : '이 컴퓨터') + '에 headroom이 설치되어 있어야 합니다.' : ''),
+    okLabel: on ? '적용' : '해제',
+  });
+  if (!ok) return;
+  t.headroom = on;
+  persistTabs();
+  renderTabs();
+  restartTab(t, continueCommand(t));
 }
 
 // attach to the tab's tmux session if it is still alive; otherwise start it again, continuing the conversation
@@ -380,7 +408,7 @@ async function closeTab(tab, { confirm = true } = {}) {
 
 function persistTabs() {
   deck.setConfig({
-    tabs: state.tabs.map((t) => ({ id: t.id, name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, tmux: t.tmux })),
+    tabs: state.tabs.map((t) => ({ id: t.id, name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, tmux: t.tmux, headroom: t.headroom })),
   });
 }
 
@@ -860,7 +888,7 @@ function renderTabs() {
         h('span', { class: 'dot' }),
         h('div', { class: 'tab-text' },
           h('div', { class: 'tab-name' }, t.name),
-          h('div', { class: 'tab-sub' }, t.tmux ? h('span', { class: 'keep-tag', title: 'tmux 세션 ' + t.tmux }, '보존 · ') : null, t.program && t.program !== 'claude' ? h('span', { class: 'prog-tag' }, t.program + ' · ') : null, t.title && t.status === 'running' ? t.title : shortPath(t.cwd))),
+          h('div', { class: 'tab-sub' }, t.tmux ? h('span', { class: 'keep-tag', title: 'tmux 세션 ' + t.tmux }, '보존 · ') : null, headroomOn(t) ? h('span', { class: 'headroom-tag', title: 'Headroom 프록시를 거쳐 실행' }, 'headroom · ') : null, t.program && t.program !== 'claude' ? h('span', { class: 'prog-tag' }, t.program + ' · ') : null, t.title && t.status === 'running' ? t.title : shortPath(t.cwd))),
         idx < 9 ? h('span', { class: 'tab-key' }, `^${idx + 1}`) : null,
         h('button', {
           class: 'tab-more',
@@ -909,11 +937,12 @@ function tabMenu(t, x, y) {
     { label: '실행 프로그램 변경…', onClick: () => changeProgramModal(t) },
     t.tmux && { label: '다시 연결 (서버 세션에 붙기)', onClick: () => reconnectTab(t) },
     isRemote(t) && !t.tmux && { label: '세션 보존으로 전환', onClick: () => convertToKeep(t) },
+    claude && HEADROOM_TOOLS.has(t.program) && { label: t.headroom ? 'Headroom 해제' : 'Headroom 적용', onClick: () => toggleHeadroom(t) },
     claude && { label: '다시 시작 (이어서)', onClick: () => restartTab(t, continueCommand(t)) },
     claude && { label: '새 대화로 다시 시작', onClick: () => restartTab(t, freshCommand(t)) },
     !claude && { label: '다시 시작', onClick: () => restartTab(t) },
-    { label: '같은 위치에 새 세션', onClick: () => createTab({ hostId: t.hostId, cwd: t.cwd, command: freshCommand(t), program: t.program, tmux: t.tmux ? tmuxNameFor(t.cwd) : null }) },
-    { label: '빠른 실행에 추가', onClick: () => addFavorite({ name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, keep: !!t.tmux }) },
+    { label: '같은 위치에 새 세션', onClick: () => createTab({ hostId: t.hostId, cwd: t.cwd, command: freshCommand(t), program: t.program, tmux: t.tmux ? tmuxNameFor(t.cwd) : null, headroom: t.headroom }) },
+    { label: '빠른 실행에 추가', onClick: () => addFavorite({ name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, keep: !!t.tmux, headroom: t.headroom }) },
     { label: '파일 패널', sc: 'Ctrl+Shift+E', onClick: () => { setActive(t.id); state.filePanel.open = true; renderFilePanel(); } },
     '-',
     { label: '세션 닫기', sc: 'Ctrl+Shift+W', danger: true, onClick: () => closeTab(t) },
@@ -953,7 +982,7 @@ function renderFavorites() {
 }
 
 function addFavorite(f) {
-  state.favorites.push({ name: f.name || defaultName(f.hostId, f.cwd), hostId: f.hostId, cwd: f.cwd, command: f.command, program: f.program !== undefined ? f.program : inferProgram(f.command), keep: !!f.keep });
+  state.favorites.push({ name: f.name || defaultName(f.hostId, f.cwd), hostId: f.hostId, cwd: f.cwd, command: f.command, program: f.program !== undefined ? f.program : inferProgram(f.command), keep: !!f.keep, headroom: !!f.headroom });
   deck.setConfig({ favorites: state.favorites });
   renderFavorites();
   toast(`빠른 실행에 추가: ${f.name}`);
@@ -1475,6 +1504,9 @@ async function newSessionModal(preset = {}) {
   const keepChk = h('input', { type: 'checkbox', checked: state.lastKeep !== false });
   const keepRow = h('div', { class: 'field' },
     h('label', { class: 'check' }, keepChk, '세션 보존 (서버 tmux에서 실행해서, 창을 닫거나 연결이 끊겨도 계속 돌아감)'));
+  const headChk = h('input', { type: 'checkbox', checked: preset.headroom ?? !!state.lastHeadroom });
+  const headRow = h('div', { class: 'field' },
+    h('label', { class: 'check' }, headChk, 'Headroom 적용 (컨텍스트 압축 프록시를 거쳐 실행해서 토큰 절약, headroom 설치 필요)'));
   const liveBox = h('div', { class: 'live-sessions' });
   let liveSeq = 0;
   const refreshLive = async () => {
@@ -1519,6 +1551,7 @@ async function newSessionModal(preset = {}) {
   const syncProgFields = () => {
     customIn.hidden = progSel.value !== '__custom';
     agentFields.hidden = progSel.value === '__custom' || progSel.value === '__shell';
+    headRow.hidden = !HEADROOM_TOOLS.has(progSel.value);
   };
   syncProgFields();
 
@@ -1570,10 +1603,12 @@ async function newSessionModal(preset = {}) {
     const name = nameIn.value.trim() || undefined;
     const tmux = hostId !== 'local' && keepChk.checked ? tmuxNameFor(cwd) : null;
     if (hostId !== 'local') state.lastKeep = keepChk.checked;
+    const headroom = HEADROOM_TOOLS.has(program) && headChk.checked;
+    if (HEADROOM_TOOLS.has(program)) state.lastHeadroom = headChk.checked;
     state.lastHostId = hostId;
     m.close();
-    const tab = createTab({ hostId, cwd, command, program, name, tmux });
-    if (favChk.checked) addFavorite({ name: tab.name, hostId, cwd, command, program, keep: !!tmux });
+    const tab = createTab({ hostId, cwd, command, program, name, tmux, headroom });
+    if (favChk.checked) addFavorite({ name: tab.name, hostId, cwd, command, program, keep: !!tmux, headroom });
   };
 
   const m = openModal({
@@ -1585,6 +1620,7 @@ async function newSessionModal(preset = {}) {
         chips, liveBox),
       h('div', { class: 'field' }, h('label', {}, '실행 프로그램'), progSel, customIn),
       agentFields,
+      headRow,
       keepRow,
       h('div', { class: 'field' }, h('label', {}, '탭 이름'), nameIn),
       h('label', { class: 'check' }, favChk, '빠른 실행에 저장')),

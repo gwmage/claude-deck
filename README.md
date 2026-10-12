@@ -32,6 +32,12 @@ npm start
 - 열린 탭은 우클릭 메뉴의 `실행 프로그램 변경…`으로 바꾸고, 같은 대화를 이어서 시작할 수 있습니다.
 - 목록은 설정 창에서 한 줄에 하나씩 관리합니다.
 
+**Headroom (컨텍스트 압축 프록시)**
+- 새 세션 창에서 `Headroom 적용`을 켜면 `headroom wrap claude -- <옵션>` 형태로 실행해서, Claude의 요청이 [Headroom](https://github.com/chopratejas/headroom) 프록시를 거칩니다.
+- 열린 탭은 우클릭 메뉴의 `Headroom 적용` / `Headroom 해제`로 바꿉니다. 같은 대화를 이어서 다시 시작합니다.
+- 세션이 도는 쪽(로컬이면 이 컴퓨터, 원격이면 서버)에 headroom이 설치되어 있어야 합니다: `pip install "headroom-ai[all]"`.
+- `headroom wrap`이 지원하는 프로그램(claude, codex, aider 등)에서만 고를 수 있습니다. `claude-glm` 같은 래퍼 함수에는 적용되지 않습니다.
+
 **원격 서버**
 - `~/.ssh/config`의 Host 항목을 자동으로 읽습니다. 직접 추가도 가능 (서버 관리).
 - 한 서버에 탭을 여러 개 열어도 SSH 연결은 하나를 공유합니다. 인증도 한 번.
