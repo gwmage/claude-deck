@@ -157,6 +157,8 @@ kbd {
 .term-wrap { position: absolute; inset: 0; padding: 8px 4px 4px 12px; display: none; }
 .term-wrap.active { display: block; }
 .term-host { width: 100%; height: 100%; }
+/* Windows 고대비(대비 테마)가 켜진 PC에서는 Chromium이 글자색을 시스템 색으로 덮어써 터미널이 단색이 된다 */
+.xterm { forced-color-adjust: none; }
 .xterm .xterm-viewport { scrollbar-width: thin; scrollbar-color: #3a3b44 transparent; }
 
 .overlay {
