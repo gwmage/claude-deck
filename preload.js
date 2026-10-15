@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('deck', {
   // sessions
   start: invoke('session:start'),
   kill: invoke('session:kill'),
+  trackSession: invoke('session:track'),
+  forgetSession: invoke('session:forget'),
   input: (id, data) => ipcRenderer.send('session:input', id, data),
   resize: (id, cols, rows) => ipcRenderer.send('session:resize', id, cols, rows),
   onData: on('session:data'),

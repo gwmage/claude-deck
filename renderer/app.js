@@ -147,6 +147,15 @@ function freshCommand(tab) {
 // Headroom (context-compression proxy): `headroom wrap <tool> -- <tool args>` starts the proxy and runs the
 // tool through it. tab.command stays unwrapped so flag handling above is unchanged; the wrap is added at launch.
 const HEADROOM_TOOLS = new Set(['claude', 'codex', 'grok', 'copilot', 'aider', 'opencode', 'cline', 'continue', 'goose', 'openhands', 'openclaw', 'vibe', 'omp', 'zcode']);
+// Claude tabs record their conversation id (SessionStart hook, see main.js), so restarting resumes this tab's own
+// conversation; a bare --continue would pick whichever conversation in the folder was used last.
+const tracksSession = (tab, command) => /^claude\b/.test(tab.program || '') && (command === tab.program || command.startsWith(tab.program + ' '));
+async function trackedCommand(tab, command) {
+  const { settingsArg, sessionId } = await deck.trackSession({ hostId: tab.hostId, tabId: tab.id });
+  let rest = command.slice(tab.program.length);
+  if (sessionId) rest = rest.replace(/\s(--continue|-c|--resume\s+[0-9a-f-]{36})(?=\s|$)/, ' --resume ' + sessionId);
+  return `${tab.program} --settings ${settingsArg}${rest}`;
+}
 const headroomOn = (tab) => !!tab.headroom && HEADROOM_TOOLS.has(tab.program);
 function launchCommand(tab, command) {
   if (!headroomOn(tab) || !(command === tab.program || command.startsWith(tab.program + ' '))) return command;
@@ -294,6 +303,7 @@ async function startTab(tab, command = tab.command) {
   tab.recentFiles = null;
   tab.knownFiles = null;
   try {
+    if (tracksSession(tab, command)) command = await trackedCommand(tab, command);
     const res = await deck.start({
       id: tab.id,
       hostId: tab.hostId,
@@ -388,6 +398,7 @@ async function closeTab(tab, { confirm = true } = {}) {
     if (!ok) return;
   }
   await deck.kill(tab.id);
+  deck.forgetSession({ hostId: tab.hostId, tabId: tab.id }).catch(() => {});
   if (killServer) {
     await deck.tmuxKill({ hostId: tab.hostId, name: tab.tmux }).catch((err) => toast('서버 세션 종료 실패: ' + cleanErr(err), { error: true }));
   }

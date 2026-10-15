@@ -606,6 +606,65 @@ ipcMain.on('session:resize', (_e, id, cols, rows) => {
 });
 ipcMain.handle('session:kill', (_e, id) => killSession(id));
 
+// Which Claude conversation a tab is on. Claude is launched with `--settings <file>` holding a SessionStart hook
+// that saves its hook input (session_id, transcript_path) to a per-tab file; it fires again on /clear and /resume,
+// so the file always names the tab's current conversation. Hooks run under bash on every platform (Git Bash on Windows).
+const TAB_ID_RE = /^[\w-]{1,64}$/;
+const bashq = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
+const hookSettings = (sessionsDir, tabId) =>
+  JSON.stringify({
+    hooks: {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: `mkdir -p ${bashq(sessionsDir)} && cat > ${bashq(`${sessionsDir}/${tabId}.json`)}` }] },
+      ],
+    },
+  });
+
+async function prepareTracking(hostId, tabId) {
+  if (!TAB_ID_RE.test(tabId)) throw new Error(`잘못된 탭 ID: ${tabId}`);
+  let info = null;
+  if (hostId === 'local') {
+    const base = path.join(app.getPath('userData'), 'claude-sessions');
+    const settings = path.join(base, `${tabId}.settings.json`);
+    fs.mkdirSync(base, { recursive: true });
+    fs.writeFileSync(settings, hookSettings(base.replace(/\\/g, '/') + '/sessions', tabId));
+    try {
+      info = JSON.parse(fs.readFileSync(path.join(base, 'sessions', `${tabId}.json`), 'utf8'));
+      if (info.transcript_path && !fs.existsSync(info.transcript_path)) info = null; // never got a message: nothing to resume
+    } catch {}
+    return { settingsArg: `"${settings}"`, sessionId: info?.session_id || null };
+  }
+  const sftp = await getSftp(hostId);
+  const base = `${await remoteHome(hostId)}/.claude-deck/claude-sessions`;
+  const settings = `${base}/${tabId}.settings.json`;
+  await sftpMkdirp(sftp, base);
+  await sftpCall(sftp, 'writeFile', settings, hookSettings(`${base}/sessions`, tabId));
+  try {
+    info = JSON.parse(String(await sftpCall(sftp, 'readFile', `${base}/sessions/${tabId}.json`)));
+    if (info.transcript_path) await sftpCall(sftp, 'stat', info.transcript_path);
+  } catch {
+    info = null;
+  }
+  return { settingsArg: shq(settings), sessionId: info?.session_id || null };
+}
+
+async function forgetTracking(hostId, tabId) {
+  if (!TAB_ID_RE.test(tabId)) return;
+  const files = [`${tabId}.settings.json`, `sessions/${tabId}.json`];
+  if (hostId === 'local') {
+    const base = path.join(app.getPath('userData'), 'claude-sessions');
+    for (const f of files) fs.rmSync(path.join(base, f), { force: true });
+    return;
+  }
+  if (!conns.has(hostId)) return; // don't open a connection (or ask for a password) just to tidy up two small files
+  const sftp = await getSftp(hostId);
+  const base = `${await remoteHome(hostId)}/.claude-deck/claude-sessions`;
+  for (const f of files) await sftpCall(sftp, 'unlink', `${base}/${f}`).catch(() => {});
+}
+
+ipcMain.handle('session:track', (_e, { hostId, tabId }) => prepareTracking(hostId, tabId));
+ipcMain.handle('session:forget', (_e, { hostId, tabId }) => forgetTracking(hostId, tabId));
+
 // ───────────────────────── files ─────────────────────────
 function sortEntries(list) {
   return list.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name, 'ko')));
