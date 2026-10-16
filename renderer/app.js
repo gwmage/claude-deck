@@ -165,7 +165,10 @@ function launchCommand(tab, command) {
 
 // ───────────────────────── terminal tabs ─────────────────────────
 function defaultName(hostId, cwd) {
-  const base = cwd && cwd !== '~' ? basename(cwd) : hostId === 'local' ? '홈' : hostById(hostId).name;
+  return uniqueName(cwd && cwd !== '~' ? basename(cwd) : hostId === 'local' ? '홈' : hostById(hostId).name);
+}
+
+function uniqueName(base) {
   const taken = new Set(state.tabs.map((t) => t.name));
   if (!taken.has(base)) return base;
   let i = 2;
@@ -972,7 +975,14 @@ function renderFavorites() {
       h('div', {
         class: 'fav',
         title: `${hostById(f.hostId).name}: ${f.cwd}\n${f.command || '(셸)'}`,
-        onclick: () => createTab({ ...f, name: undefined, tmux: f.keep ? tmuxNameFor(f.cwd) : null }),
+        onclick: () => createTab({ ...f, name: f.name ? uniqueName(f.name) : undefined, tmux: f.keep ? tmuxNameFor(f.cwd) : null }),
+        oncontextmenu: (e) => {
+          e.preventDefault();
+          showMenu(e.clientX, e.clientY, [
+            { label: '수정…', onClick: () => editFavoriteModal(i) },
+            { label: '삭제', danger: true, onClick: () => removeFavorite(i) },
+          ]);
+        },
       },
       h('span', { class: 'fav-icon' }, '▶'),
       h('div', { class: 'fav-text' },
@@ -980,23 +990,89 @@ function renderFavorites() {
         h('div', { class: 'fav-sub' }, `${hostById(f.hostId).name} · ${shortPath(f.cwd)}`)),
       h('button', {
         class: 'fav-del',
+        title: '수정',
+        onclick: (e) => {
+          e.stopPropagation();
+          editFavoriteModal(i);
+        },
+      }, '✎'),
+      h('button', {
+        class: 'fav-del',
         title: '삭제',
         onclick: (e) => {
           e.stopPropagation();
-          state.favorites.splice(i, 1);
-          deck.setConfig({ favorites: state.favorites });
-          renderFavorites();
+          removeFavorite(i);
         },
       }, '✕'))
     );
   });
 }
 
+function removeFavorite(i) {
+  state.favorites.splice(i, 1);
+  deck.setConfig({ favorites: state.favorites });
+  renderFavorites();
+}
+
+function editFavoriteModal(i) {
+  const f = state.favorites[i];
+  if (!f) return;
+  const nameIn = h('input', { type: 'text', value: f.name || '', placeholder: '비워두면 폴더 이름' });
+  const pathIn = h('input', { type: 'text', spellcheck: 'false', value: f.cwd || '~', placeholder: '~ 또는 절대 경로' });
+  const cmdIn = h('input', { type: 'text', spellcheck: 'false', value: f.command || '', placeholder: '비워두면 셸' });
+  const keepChk = h('input', { type: 'checkbox', checked: !!f.keep });
+  const headChk = h('input', { type: 'checkbox', checked: !!f.headroom });
+  const headRow = h('div', { class: 'field' }, h('label', { class: 'check' }, headChk, 'Headroom 적용'));
+  const syncHead = () => (headRow.hidden = !HEADROOM_TOOLS.has(inferProgram(cmdIn.value.trim())));
+  cmdIn.addEventListener('input', syncHead);
+  syncHead();
+  const browse = async () => {
+    const picked = f.hostId === 'local' ? await deck.pickDir({ defaultPath: pathIn.value }) : await dirBrowserModal(f.hostId, pathIn.value);
+    if (picked) pathIn.value = picked;
+  };
+  const save = () => {
+    const cwd = pathIn.value.trim() || '~';
+    const command = cmdIn.value.trim();
+    const program = inferProgram(command);
+    state.favorites[i] = {
+      ...f,
+      name: nameIn.value.trim() || basename(cwd) || f.name,
+      cwd,
+      command,
+      program,
+      keep: f.hostId !== 'local' && keepChk.checked,
+      headroom: HEADROOM_TOOLS.has(program) && headChk.checked,
+    };
+    deck.setConfig({ favorites: state.favorites });
+    renderFavorites();
+    m.close();
+  };
+  const m = openModal({
+    title: '빠른 실행 수정',
+    body: h('div', {},
+      h('div', { class: 'prompt-msg' }, `어디서: ${hostById(f.hostId).name}`),
+      h('div', { class: 'field' }, h('label', {}, '탭 이름'), nameIn),
+      h('div', { class: 'field' }, h('label', {}, '폴더'),
+        h('div', { class: 'row' }, h('div', { class: 'grow' }, pathIn), h('button', { class: 'btn', onclick: browse }, '찾아보기…'))),
+      h('div', { class: 'field' }, h('label', {}, '실행 명령'), cmdIn),
+      headRow,
+      f.hostId !== 'local' ? h('div', { class: 'field' }, h('label', { class: 'check' }, keepChk, '세션 보존 (서버 tmux에서 실행)')) : null),
+    actions: [
+      { label: '취소', onClick: () => m.close() },
+      { label: '저장', primary: true, onClick: save },
+    ],
+  });
+  setTimeout(() => {
+    nameIn.focus();
+    nameIn.select();
+  }, 0);
+}
+
 function addFavorite(f) {
   state.favorites.push({ name: f.name || defaultName(f.hostId, f.cwd), hostId: f.hostId, cwd: f.cwd, command: f.command, program: f.program !== undefined ? f.program : inferProgram(f.command), keep: !!f.keep, headroom: !!f.headroom });
   deck.setConfig({ favorites: state.favorites });
   renderFavorites();
-  toast(`빠른 실행에 추가: ${f.name}`);
+  toast(`빠른 실행에 추가: ${state.favorites.at(-1).name}`);
 }
 
 function updateTopbar() {
