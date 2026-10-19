@@ -51,6 +51,10 @@ contextBridge.exposeInMainWorld('deck', {
   pasteFromMain: invoke('clip:pasteCommand'),
   clipWrite: invoke('clip:write'),
 
+  // self-update
+  updateCheck: invoke('update:check'),
+  updateApply: invoke('update:apply'),
+
   // misc
   notify: (o) => ipcRenderer.send('notify', o),
   openUrl: (url) => ipcRenderer.send('open-url', url),

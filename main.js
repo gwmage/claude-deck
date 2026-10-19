@@ -6,6 +6,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const { StringDecoder } = require('string_decoder');
+const { execFile, spawn } = require('child_process');
 const pty = require('node-pty');
 const { Client, utils: sshUtils } = require('ssh2');
 
@@ -887,6 +888,65 @@ ipcMain.handle('dialog:pickFile', async (_e, { defaultPath } = {}) => {
 ipcMain.handle('dialog:pickDir', async (_e, { defaultPath } = {}) => {
   const r = await dialog.showOpenDialog(win, { defaultPath: expandHome(defaultPath || '~'), properties: ['openDirectory'] });
   return r.canceled ? null : r.filePaths[0];
+});
+
+// ───────────────────────── self-update (the app runs from a git clone) ─────────────────────────
+const APP_DIR = __dirname;
+function git(args, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd: APP_DIR, timeout, windowsHide: true }, (err, stdout, stderr) =>
+      err ? reject(new Error((stderr || err.message).trim())) : resolve(stdout.trim()));
+  });
+}
+
+// null when this is not a git checkout with an upstream (or git/network is unavailable): nothing to offer
+ipcMain.handle('update:check', async () => {
+  try {
+    await git(['rev-parse', '--abbrev-ref', '@{u}']);
+    await git(['fetch', '--quiet']);
+    const [behind, ahead] = (await git(['rev-list', '--left-right', '--count', '@{u}...HEAD'])).split(/\s+/).map(Number);
+    if (!behind) return { behind: 0 };
+    const log = await git(['log', '--format=%h%x09%ad%x09%s', '--date=short', 'HEAD..@{u}']);
+    const commits = log.split('\n').filter(Boolean).map((l) => {
+      const [hash, date, subject] = l.split('\t');
+      return { hash, date, subject };
+    });
+    return { behind, ahead, commits };
+  } catch {
+    return null;
+  }
+});
+
+// Fast-forward to upstream, then restart. When dependencies changed, npm install has to run after this process
+// exits (electron.exe and node-pty's .node file stay locked while it runs), so a helper script waits for the
+// exit, installs, and starts the app again in a console window that shows the install.
+ipcMain.handle('update:apply', async () => {
+  const before = await git(['rev-parse', 'HEAD']);
+  await git(['merge', '--ff-only', '@{u}'], 60000);
+  const changed = await git(['diff', '--name-only', before, 'HEAD']);
+  const depsChanged = /^package(-lock)?\.json$/m.test(changed);
+  forceQuit = true;
+  if (depsChanged) {
+    const q = (s) => `"${s}"`;
+    const script = path.join(os.tmpdir(), `claude-deck-update-${process.pid}.cmd`);
+    fs.writeFileSync(script, [
+      '@echo off',
+      'chcp 65001 >nul', // the app folder path may hold non-ASCII characters
+      'echo Updating Claude Deck: waiting for the app to close...',
+      ':wait',
+      `tasklist /FI "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul && (timeout /t 1 /nobreak >nul & goto wait)`,
+      `cd /d ${q(APP_DIR)}`,
+      'call npm install',
+      'if errorlevel 1 (echo. & echo npm install failed. Check the output above, then run npm install in this folder yourself. & pause & exit /b 1)',
+      `start "" ${q(process.execPath)} ${process.argv.slice(1).map(q).join(' ')}`,
+      `del "%~f0"`,
+    ].join('\r\n'));
+    spawn('cmd.exe', ['/c', script], { detached: true, stdio: 'ignore' }).unref();
+  } else {
+    app.relaunch();
+  }
+  setTimeout(() => (win ? win.close() : app.quit()), 100);
+  return { depsChanged };
 });
 
 ipcMain.on('notify', (_e, { title, body, tabId }) => {

@@ -246,6 +246,9 @@ kbd {
 .chip:hover { color: var(--text); border-color: var(--accent); }
 .check { display: flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; }
 .hint { font-size: 11.5px; color: var(--dim); margin-top: 5px; line-height: 1.5; }
+.update-list { max-height: 260px; overflow-y: auto; margin-bottom: 12px; font-size: 12.5px; line-height: 1.6; }
+.update-row { display: flex; gap: 10px; padding: 2px 0; }
+.update-date { color: var(--dim); flex: none; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11.5px; }
 .prompt-msg { white-space: pre-wrap; color: var(--muted); line-height: 1.6; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', monospace; font-size: 12px; }
 .dir-list { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; height: 340px; overflow-y: auto; padding: 4px; background: var(--bg); }
 .error { color: var(--red); padding: 10px; white-space: pre-wrap; }

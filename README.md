@@ -14,6 +14,8 @@ npm install
 npm start
 ```
 
+켤 때마다 GitHub에 새 커밋이 있는지 확인하고, 있으면 오른쪽 아래 알림의 `업데이트…`로 받아서 다시 시작합니다(`git` 필요). 패키지가 바뀐 업데이트는 앱이 닫힌 뒤 `npm install`을 돌리는 창이 잠깐 뜹니다.
+
 `npm install` 중 Electron 바이너리가 안 받아졌다면 `node node_modules/electron/install.js`를 한 번 실행하세요.
 바로가기를 만들려면 대상을 `node_modules\electron\dist\electron.exe`, 인수를 이 폴더 경로로 지정하면 됩니다.
 

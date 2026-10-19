@@ -2060,6 +2060,51 @@ $('#btn-new-empty').addEventListener('click', () => newSessionModal());
 $('#btn-hosts').addEventListener('click', hostsModal);
 $('#btn-settings').addEventListener('click', settingsModal);
 
+// ───────────────────────── self-update ─────────────────────────
+async function checkUpdate() {
+  const r = await deck.updateCheck().catch(() => null);
+  if (!r?.behind) return;
+  const t = toast(`새 버전이 있습니다 (변경 ${r.behind}개)`, {
+    sticky: true,
+    actions: [
+      { label: '나중에', onClick: () => t.close() },
+      { label: '업데이트…', primary: true, onClick: () => (t.close(), updateModal(r)) },
+    ],
+  });
+}
+
+function updateModal(r) {
+  const running = state.tabs.filter((t) => t.status === 'running').length;
+  const m = openModal({
+    title: '업데이트',
+    body: h('div', {},
+      h('div', { class: 'update-list' },
+        r.commits.map((c) => h('div', { class: 'update-row' }, h('span', { class: 'update-date' }, c.date), h('span', {}, c.subject)))),
+      r.ahead ? h('div', { class: 'hint' }, `이 컴퓨터에만 있는 커밋이 ${r.ahead}개 있어 자동으로 합칠 수 없을 수 있습니다.`) : null,
+      h('div', { class: 'prompt-msg' },
+        '업데이트를 받은 뒤 앱을 다시 시작합니다. ' +
+        (running ? `실행 중인 세션 ${running}개가 종료되며, 탭 목록은 남아 있어 "이어서 시작"으로 다시 열 수 있습니다. ` : '') +
+        '필요한 패키지가 바뀐 경우 설치 창이 잠깐 뜹니다.')),
+    actions: [
+      { label: '나중에', onClick: () => m.close() },
+      {
+        label: '업데이트 후 재시작',
+        primary: true,
+        onClick: async () => {
+          m.close();
+          const t = toast('업데이트 받는 중…', { sticky: true });
+          try {
+            await deck.updateApply();
+          } catch (err) {
+            t.close();
+            toast('업데이트 실패: ' + cleanErr(err), { error: true, sticky: true, actions: [] });
+          }
+        },
+      },
+    ],
+  });
+}
+
 // ───────────────────────── boot ─────────────────────────
 (async function init() {
   const [hosts, cfg] = await Promise.all([deck.hosts(), deck.getConfig()]);
@@ -2074,4 +2119,5 @@ $('#btn-settings').addEventListener('click', settingsModal);
   renderTabs();
   renderFavorites();
   updateTopbar();
+  setTimeout(checkUpdate, 3000);
 })();
