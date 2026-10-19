@@ -636,6 +636,115 @@ function registerFileLinks(tab) {
       callback(links.length ? links : undefined);
     },
   });
+  // Claude hands over commands to run yourself as "! <command>"; clicking the "!" line types it back in.
+  term.registerLinkProvider({
+    provideLinks(y, callback) {
+      const line = term.buffer.active.getLine(y - 1);
+      const text = line && !line.isWrapped ? line.translateToString(true) : '';
+      const m = /^(\s*)! \S/.exec(text);
+      if (!m) return callback(undefined);
+      callback([{
+        range: { start: { x: m[1].length + 1, y }, end: { x: text.length, y } },
+        text,
+        decorations: { pointerCursor: true, underline: true },
+        activate: () => runBangModal(tab, bangCommand(term, y)),
+      }]);
+    },
+  });
+}
+
+// The command starting at row `y` (1-based): following rows up to a blank line, a box border or a new bullet.
+// Each row break is one of: a long token cut at the right edge (glued back), a wrap at a space (joined with a
+// space), or a real newline in a multi-line command. A wrap only happens when the next word did not fit, so if it
+// would have fit on the row, the break was a newline. A trailing "\" is always one. Widths are in screen cells,
+// since Korean takes two.
+function bangCommand(term, y) {
+  const buf = term.buffer.active;
+  const nc = buf.getNullCell();
+  const rowText = (r) => buf.getLine(r)?.translateToString(true) ?? '';
+  const endCol = (line) => {
+    for (let x = line.length - 1; x >= 0; x--) {
+      const cell = line.getCell(x, nc);
+      if (cell && cell.getWidth() && (cell.getChars() || ' ') !== ' ') return x + cell.getWidth();
+    }
+    return 0;
+  };
+  // cells taken by the first word of a row: the row's cells up to the first space after its indent
+  // (the second half of a wide character is an empty zero-width cell, not a space)
+  const blank = (line, x) => {
+    const cell = line.getCell(x, nc);
+    return !cell || (cell.getWidth() !== 0 && (cell.getChars() || ' ') === ' ');
+  };
+  const firstWordCells = (line) => {
+    let x = 0;
+    while (x < line.length && blank(line, x)) x++;
+    const from = x;
+    while (x < line.length && !blank(line, x)) x++;
+    return x - from;
+  };
+  const first = rowText(y - 1);
+  const base = first.length - first.trimStart().length;
+  const rows = [{ raw: first, line: buf.getLine(y - 1) }];
+  for (let r = y; r < y + MAX_LINK_ROWS; r++) {
+    const line = buf.getLine(r);
+    if (!line) break;
+    const raw = rowText(r);
+    const t = raw.trim();
+    if (!t || BOX_RE.test(t[0]) || /^[⏺●❯✻✶]/.test(t) || /^! /.test(t)) break;
+    rows.push({ raw, line });
+  }
+  rows.forEach((x) => (x.end = endCol(x.line)));
+  // Claude's wrap width is unknown, so the widest row stands in for it (erring toward joining). A block whose rows all
+  // stay well short of the edge was never wrapped, so every break in it is a newline.
+  const widest = Math.max(...rows.map((x) => x.end));
+  const width = widest < term.cols * 0.6 ? Infinity : widest;
+  let cmd = first.trimStart().replace(/^!\s*/, '');
+  for (let i = 1; i < rows.length; i++) {
+    const prev = rows[i - 1];
+    const { raw, line } = rows[i];
+    if (line.isWrapped) cmd += raw;
+    else if (prev.end >= term.cols - SOFT_WRAP_SLACK) cmd += raw.trimStart();
+    else if (/\\$/.test(prev.raw) || prev.end + 1 + firstWordCells(line) <= width) cmd += '\n' + raw.slice(Math.min(base, raw.length - raw.trimStart().length));
+    else cmd += ' ' + raw.trim();
+  }
+  return cmd.trim();
+}
+
+function runBangModal(tab, cmd) {
+  if (tab.status !== 'running') return toast('세션이 실행 중이 아닙니다', { error: true });
+  const ta = h('textarea', { rows: Math.min(14, Math.max(3, cmd.split('\n').reduce((n, l) => n + Math.ceil((l.length + 1) / 90), 0))), spellcheck: 'false' });
+  ta.value = cmd;
+  const agent = isAgent(tab);
+  const send = (enter) => {
+    const c = ta.value.trim();
+    m.close();
+    if (!c) return;
+    // in Claude the leading "!" switches the prompt to bash mode, so it goes in as a keystroke before the paste
+    if (agent) deck.input(tab.id, '!');
+    setTimeout(() => {
+      tab.term.paste(c);
+      if (enter) setTimeout(() => deck.input(tab.id, '\r'), 150);
+      tab.term.focus();
+    }, agent ? 80 : 0);
+  };
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.ctrlKey) {
+      e.preventDefault();
+      send(true);
+    }
+  });
+  const m = openModal({
+    title: '명령 실행',
+    body: h('div', {},
+      h('div', { class: 'prompt-msg' }, agent ? 'Claude 입력창에 ! 명령으로 넣습니다. 내용을 확인하고 필요하면 고치세요.' : '터미널에 입력합니다. 내용을 확인하고 필요하면 고치세요.'),
+      h('div', { class: 'field' }, ta)),
+    actions: [
+      { label: '취소', onClick: () => m.close() },
+      { label: '입력만', onClick: () => send(false) },
+      { label: '실행 (Ctrl+Enter)', primary: true, onClick: () => send(true) },
+    ],
+  });
+  setTimeout(() => ta.focus(), 0);
 }
 
 // ───────────────────────── paste / drop ─────────────────────────
