@@ -10,7 +10,10 @@
   <div id="app">
     <aside id="sidebar">
       <div class="brand"><span class="logo">✳</span><span>Claude Deck</span></div>
-      <button id="btn-new" class="btn-new">＋ 새 세션 <kbd>Ctrl+Shift+T</kbd></button>
+      <div class="new-row">
+        <button id="btn-new" class="btn-new">＋ 새 세션 <kbd>Ctrl+Shift+T</kbd></button>
+        <button id="btn-folder" class="btn-folder" title="새 폴더 (세션을 끌어다 넣을 수 있습니다)">📁</button>
+      </div>
       <nav id="tabs"></nav>
       <section class="side-section">
         <div class="side-title">빠른 실행</div>
@@ -21,6 +24,7 @@
         <button id="btn-settings">⚙ 설정</button>
       </footer>
     </aside>
+    <div id="sidebar-grip" title="드래그: 사이드바 너비 조절 · 더블클릭: 기본 너비"></div>
 
     <main id="main">
       <header id="topbar">

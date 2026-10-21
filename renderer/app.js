@@ -33,6 +33,7 @@ const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>'
 const state = {
   hosts: [],
   tabs: [],
+  folders: [],
   activeId: null,
   settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false },
   favorites: [],
@@ -186,6 +187,7 @@ function createTab(opts, { activate: doActivate = true } = {}) {
     program: opts.program !== undefined ? opts.program : inferProgram(opts.command ?? 'claude'),
     tmux: opts.tmux || null,
     headroom: !!opts.headroom,
+    folder: opts.folder || null,
     status: 'new',
     title: '',
     attention: false,
@@ -422,7 +424,7 @@ async function closeTab(tab, { confirm = true } = {}) {
 
 function persistTabs() {
   deck.setConfig({
-    tabs: state.tabs.map((t) => ({ id: t.id, name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, tmux: t.tmux, headroom: t.headroom })),
+    tabs: state.tabs.map((t) => ({ id: t.id, name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, tmux: t.tmux, headroom: t.headroom, folder: folderOf(t) })),
   });
 }
 
@@ -875,6 +877,7 @@ termsEl.addEventListener('paste', (e) => {
 }, true);
 termsEl.addEventListener('dragover', (e) => {
   e.preventDefault();
+  if (dragItem) return; // a sidebar tab being reordered, not a file
   termsEl.classList.add('drop');
 });
 termsEl.addEventListener('dragleave', (e) => {
@@ -978,71 +981,137 @@ function shortPath(p) {
   return parts.length > 3 ? '…/' + parts.slice(-2).join('/') : p;
 }
 
-function renderTabs() {
-  const nav = $('#tabs');
-  nav.replaceChildren();
-  const groups = new Map();
+// ── folders: user groups shown above the loose tabs, which stay grouped by host
+const folderById = (id) => state.folders.find((f) => f.id === id);
+const folderOf = (t) => (t.folder && folderById(t.folder) ? t.folder : null);
+function persistFolders() {
+  deck.setConfig({ folders: state.folders.map(({ id, name, collapsed }) => ({ id, name, collapsed: !!collapsed })) });
+}
+
+// Folders first in their own order, then loose tabs by host. state.tabs is kept in this order, so Ctrl+1…9,
+// Ctrl+Tab and the ^N labels follow what the sidebar shows.
+function sidebarGroups() {
+  const folders = state.folders.map((folder) => ({ folder, tabs: [] }));
+  const hosts = new Map();
   for (const t of state.tabs) {
-    if (!groups.has(t.hostId)) groups.set(t.hostId, []);
-    groups.get(t.hostId).push(t);
-  }
-  for (const [hostId, tabs] of groups) {
-    const host = hostById(hostId);
-    nav.append(
-      h('div', { class: 'group-title' },
-        h('span', {}, hostId === 'local' ? '💻' : '🖥'),
-        h('span', { class: 'gname' }, host.name),
-        h('button', { class: 'group-add', title: `${host.name}에서 새 세션`, onclick: () => newSessionModal({ hostId }) }, '+'))
-    );
-    for (const t of tabs) {
-      const idx = state.tabs.indexOf(t);
-      const st = tabStateClass(t);
-      nav.append(
-        h('div', {
-          class: `tab st-${st}${t.id === state.activeId ? ' active' : ''}`,
-          title: `${STATUS_LABEL[st] || st}\n${host.name}: ${t.cwd}\n${t.command || '(셸)'}\n\n더블클릭: 이름 변경 · 우클릭: 메뉴`,
-          onclick: () => setActive(t.id),
-          ondblclick: () => renameTab(t),
-          oncontextmenu: (e) => {
-            e.preventDefault();
-            tabMenu(t, e.clientX, e.clientY);
-          },
-        },
-        h('span', { class: 'dot' }),
-        h('div', { class: 'tab-text' },
-          h('div', { class: 'tab-name' }, t.name),
-          h('div', { class: 'tab-sub' }, t.tmux ? h('span', { class: 'keep-tag', title: 'tmux 세션 ' + t.tmux }, '보존 · ') : null, headroomOn(t) ? h('span', { class: 'headroom-tag', title: 'Headroom 프록시를 거쳐 실행' }, 'headroom · ') : null, t.program && t.program !== 'claude' ? h('span', { class: 'prog-tag' }, t.program + ' · ') : null, t.title && t.status === 'running' ? t.title : shortPath(t.cwd))),
-        idx < 9 ? h('span', { class: 'tab-key' }, `^${idx + 1}`) : null,
-        h('button', {
-          class: 'tab-more',
-          title: '메뉴',
-          onclick: (e) => {
-            e.stopPropagation();
-            const r = e.currentTarget.getBoundingClientRect();
-            tabMenu(t, r.right, r.bottom);
-          },
-        }, '⋯'))
-      );
+    const f = folderOf(t);
+    if (f) folders.find((g) => g.folder.id === f).tabs.push(t);
+    else {
+      if (!hosts.has(t.hostId)) hosts.set(t.hostId, { hostId: t.hostId, tabs: [] });
+      hosts.get(t.hostId).tabs.push(t);
     }
   }
+  return [...folders, ...hosts.values()];
+}
+
+// renders are held while a sidebar item is dragged or renamed (busy/idle changes re-render every second)
+let dragItem = null;
+let sidebarEditing = false;
+
+function renderTabs() {
+  const groups = sidebarGroups();
+  state.tabs.splice(0, state.tabs.length, ...groups.flatMap((g) => g.tabs));
   $('#empty').hidden = state.tabs.length > 0;
   const attention = state.tabs.filter((t) => t.attention).length;
   document.title = attention ? `(${attention}) Claude Deck` : 'Claude Deck';
+  if (dragItem || sidebarEditing) return;
+
+  const nav = $('#tabs');
+  nav.replaceChildren();
+  for (const g of groups) {
+    const f = g.folder;
+    if (f) {
+      // a collapsed folder still shows its active tab and any tab asking for attention
+      const shown = f.collapsed ? g.tabs.filter((t) => t.id === state.activeId || t.attention) : g.tabs;
+      nav.append(
+        h('div', {
+          class: `group-title folder${f.collapsed ? ' collapsed' : ''}`,
+          draggable: 'true',
+          'data-folder': f.id,
+          title: `${f.name}\n\n클릭: 접기/펼치기 · 우클릭: 메뉴 · 드래그: 순서 변경`,
+          onclick: () => toggleFolder(f),
+          oncontextmenu: (e) => {
+            e.preventDefault();
+            folderMenu(f, e.clientX, e.clientY);
+          },
+        },
+        h('span', { class: 'caret' }, f.collapsed ? '▸' : '▾'),
+        h('span', { class: 'gname' }, f.name),
+        h('span', { class: 'gcount' }, g.tabs.length),
+        h('button', {
+          class: 'group-add',
+          title: '폴더 메뉴',
+          onclick: (e) => {
+            e.stopPropagation();
+            const r = e.currentTarget.getBoundingClientRect();
+            folderMenu(f, r.right, r.bottom);
+          },
+        }, '⋯'))
+      );
+      const box = h('div', { class: 'folder-tabs', 'data-box': f.id }, shown.map((t) => tabItem(t, true)));
+      if (!g.tabs.length) box.append(h('div', { class: 'folder-empty' }, '세션을 여기로 끌어다 놓으세요'));
+      nav.append(box);
+      continue;
+    }
+    const host = hostById(g.hostId);
+    nav.append(
+      h('div', { class: 'group-title', 'data-host': g.hostId },
+        h('span', {}, g.hostId === 'local' ? '💻' : '🖥'),
+        h('span', { class: 'gname' }, host.name),
+        h('button', { class: 'group-add', title: `${host.name}에서 새 세션`, onclick: () => newSessionModal({ hostId: g.hostId }) }, '+')),
+      ...g.tabs.map((t) => tabItem(t, false))
+    );
+  }
 }
 
-function renameTab(t) {
-  const item = [...document.querySelectorAll('.tab')].find((el) => el.querySelector('.tab-name')?.textContent === t.name);
-  const nameEl = item?.querySelector('.tab-name');
-  if (!nameEl) return;
-  const input = h('input', { class: 'tab-rename', value: t.name });
+function tabItem(t, inFolder) {
+  const idx = state.tabs.indexOf(t);
+  const st = tabStateClass(t);
+  const host = hostById(t.hostId);
+  return h('div', {
+    class: `tab st-${st}${t.id === state.activeId ? ' active' : ''}`,
+    draggable: 'true',
+    'data-id': t.id,
+    title: `${STATUS_LABEL[st] || st}\n${host.name}: ${t.cwd}\n${t.command || '(셸)'}\n\n더블클릭: 이름 변경 · 우클릭: 메뉴 · 드래그: 순서 변경`,
+    onclick: () => setActive(t.id),
+    ondblclick: () => renameTab(t),
+    oncontextmenu: (e) => {
+      e.preventDefault();
+      tabMenu(t, e.clientX, e.clientY);
+    },
+  },
+  h('span', { class: 'dot' }),
+  h('div', { class: 'tab-text' },
+    h('div', { class: 'tab-name' }, t.name),
+    h('div', { class: 'tab-sub' }, inFolder && isRemote(t) ? h('span', { class: 'host-tag' }, host.name + ' · ') : null, t.tmux ? h('span', { class: 'keep-tag', title: 'tmux 세션 ' + t.tmux }, '보존 · ') : null, headroomOn(t) ? h('span', { class: 'headroom-tag', title: 'Headroom 프록시를 거쳐 실행' }, 'headroom · ') : null, t.program && t.program !== 'claude' ? h('span', { class: 'prog-tag' }, t.program + ' · ') : null, t.title && t.status === 'running' ? t.title : shortPath(t.cwd))),
+  idx < 9 ? h('span', { class: 'tab-key' }, `^${idx + 1}`) : null,
+  h('button', {
+    class: 'tab-more',
+    title: '메뉴',
+    onclick: (e) => {
+      e.stopPropagation();
+      const r = e.currentTarget.getBoundingClientRect();
+      tabMenu(t, r.right, r.bottom);
+    },
+  }, '⋯'));
+}
+
+// swap a name element for an input; Enter/blur saves, Esc cancels
+function editInline(nameEl, value, save) {
+  const item = nameEl.closest('[draggable]');
+  if (item) item.draggable = false; // a draggable parent would turn text selection into a drag
+  sidebarEditing = true;
+  const input = h('input', { class: 'tab-rename', value });
   nameEl.replaceChildren(input);
   input.focus();
   input.select();
-  const done = (save) => {
-    if (save && input.value.trim()) t.name = input.value.trim();
-    persistTabs();
+  let finished = false;
+  const done = (ok) => {
+    if (finished) return;
+    finished = true;
+    sidebarEditing = false;
+    if (ok && input.value.trim()) save(input.value.trim());
     renderTabs();
-    updateTopbar();
   };
   input.addEventListener('keydown', (e) => {
     e.stopPropagation();
@@ -1051,7 +1120,170 @@ function renameTab(t) {
   });
   input.addEventListener('blur', () => done(true));
   input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('dblclick', (e) => e.stopPropagation());
 }
+
+function renameTab(t) {
+  const nameEl = $(`.tab[data-id="${t.id}"] .tab-name`);
+  if (!nameEl) return;
+  editInline(nameEl, t.name, (name) => {
+    t.name = name;
+    persistTabs();
+    updateTopbar();
+  });
+}
+
+function renameFolder(f) {
+  const nameEl = $(`.group-title[data-folder="${f.id}"] .gname`);
+  if (!nameEl) return;
+  editInline(nameEl, f.name, (name) => {
+    f.name = name;
+    persistFolders();
+  });
+}
+
+async function newFolder(tab) {
+  const name = (await promptModal({ title: '새 폴더', message: tab ? `"${tab.name}"을 넣을 폴더 이름` : '폴더 이름', input: 'text', okLabel: '만들기' }) || '').trim();
+  if (!name) return null;
+  const f = { id: crypto.randomUUID(), name, collapsed: false };
+  state.folders.push(f);
+  persistFolders();
+  if (tab) moveTab(tab, f.id);
+  else renderTabs();
+  return f;
+}
+
+function toggleFolder(f) {
+  f.collapsed = !f.collapsed;
+  persistFolders();
+  renderTabs();
+}
+
+async function deleteFolder(f) {
+  const n = state.tabs.filter((t) => folderOf(t) === f.id).length;
+  if (n) {
+    const ok = await confirmModal({
+      title: '폴더 삭제',
+      message: `"${f.name}" 폴더를 지웁니다.\n안에 있던 세션 ${n}개는 닫히지 않고 서버별 목록으로 돌아갑니다.`,
+      okLabel: '폴더 삭제',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  state.folders.splice(state.folders.indexOf(f), 1);
+  for (const t of state.tabs) if (t.folder === f.id) t.folder = null;
+  persistFolders();
+  renderTabs();
+  persistTabs();
+}
+
+function folderMenu(f, x, y) {
+  showMenu(x, y, [
+    { label: '이 폴더에 새 세션', onClick: () => newSessionModal({ folder: f.id }) },
+    { label: '이름 변경', onClick: () => renameFolder(f) },
+    { label: f.collapsed ? '펼치기' : '접기', onClick: () => toggleFolder(f) },
+    { label: '새 폴더', onClick: () => newFolder() },
+    '-',
+    { label: '폴더 삭제 (세션은 유지)', danger: true, onClick: () => deleteFolder(f) },
+  ]);
+}
+
+// Move `tab` into `folder` (null = back with its host's loose tabs), next to `target` or else to the end of that group.
+function moveTab(tab, folder, target = null, after = false) {
+  state.tabs.splice(state.tabs.indexOf(tab), 1);
+  tab.folder = folder;
+  let i;
+  if (target) i = state.tabs.indexOf(target) + (after ? 1 : 0);
+  else {
+    const last = state.tabs.findLastIndex((t) => (folder ? folderOf(t) === folder : !folderOf(t) && t.hostId === tab.hostId));
+    i = last < 0 ? state.tabs.length : last + 1;
+  }
+  state.tabs.splice(i, 0, tab);
+  renderTabs();
+  persistTabs();
+}
+
+function moveFolder(f, target, after) {
+  state.folders.splice(state.folders.indexOf(f), 1);
+  state.folders.splice(target ? state.folders.indexOf(target) + (after ? 1 : 0) : state.folders.length, 0, f);
+  persistFolders();
+  renderTabs();
+  persistTabs();
+}
+
+// ── drag to reorder: tabs onto tabs or folder headers, folders onto folder headers
+const DROP_CLS = ['drop-before', 'drop-after', 'drop-into'];
+function dropTarget(e) {
+  const el = e.target.closest?.('.tab, .group-title');
+  const lower = !!el && e.clientY > el.getBoundingClientRect().top + el.offsetHeight / 2;
+  if (dragItem.kind === 'folder') {
+    const f = folderById(dragItem.id);
+    const target = el && folderById(el.dataset.folder);
+    if (!el) return { apply: () => moveFolder(f, null) };
+    if (!target || target === f) return null;
+    return { el, cls: lower ? 'drop-after' : 'drop-before', apply: () => moveFolder(f, target, lower) };
+  }
+  const tab = tabById(dragItem.id);
+  const box = e.target.closest?.('.folder-tabs');
+  if (!el && box) return { el: box.previousElementSibling, cls: 'drop-into', apply: () => moveTab(tab, box.dataset.box) };
+  if (!el) return { apply: () => moveTab(tab, null) }; // empty space below the list: out of any folder
+  if (el.dataset.folder) return { el, cls: 'drop-into', apply: () => moveTab(tab, el.dataset.folder) };
+  if (el.dataset.host) {
+    if (el.dataset.host !== tab.hostId) return null; // loose tabs are grouped by host and can't change it
+    const first = state.tabs.find((t) => t !== tab && !folderOf(t) && t.hostId === tab.hostId);
+    return { el, cls: 'drop-into', apply: () => moveTab(tab, null, first, false) };
+  }
+  const target = tabById(el.dataset.id);
+  if (!target || target === tab) return null;
+  const folder = folderOf(target);
+  if (!folder && target.hostId !== tab.hostId) return null;
+  return { el, cls: lower ? 'drop-after' : 'drop-before', apply: () => moveTab(tab, folder, target, lower) };
+}
+function clearDropMarks() {
+  for (const el of document.querySelectorAll('#tabs .drop-before, #tabs .drop-after, #tabs .drop-into')) el.classList.remove(...DROP_CLS);
+}
+const tabsNav = $('#tabs');
+tabsNav.addEventListener('dragstart', (e) => {
+  const el = e.target.closest?.('[draggable="true"]');
+  if (!el) return;
+  dragItem = el.dataset.folder ? { kind: 'folder', id: el.dataset.folder } : { kind: 'tab', id: el.dataset.id };
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('application/x-deck-' + dragItem.kind, dragItem.id);
+  el.classList.add('dragging');
+});
+tabsNav.addEventListener('dragover', (e) => {
+  if (!dragItem) return;
+  const t = dropTarget(e);
+  clearDropMarks();
+  e.preventDefault();
+  e.dataTransfer.dropEffect = t ? 'move' : 'none';
+  if (t?.el) t.el.classList.add(t.cls);
+});
+tabsNav.addEventListener('drop', (e) => {
+  if (!dragItem) return;
+  e.preventDefault();
+  const t = dropTarget(e);
+  dragItem = null;
+  clearDropMarks();
+  if (t) t.apply();
+  else renderTabs();
+});
+tabsNav.addEventListener('dragleave', (e) => {
+  if (!tabsNav.contains(e.relatedTarget)) clearDropMarks();
+});
+tabsNav.addEventListener('dragend', () => {
+  if (!dragItem) return; // dropped: already rendered
+  dragItem = null;
+  renderTabs();
+});
+tabsNav.addEventListener('contextmenu', (e) => {
+  if (e.target.closest('.tab, .group-title')) return;
+  e.preventDefault();
+  showMenu(e.clientX, e.clientY, [
+    { label: '새 세션', sc: 'Ctrl+Shift+T', onClick: () => newSessionModal() },
+    { label: '새 폴더', onClick: () => newFolder() },
+  ]);
+});
 
 function tabMenu(t, x, y) {
   const claude = isAgent(t);
@@ -1064,9 +1296,13 @@ function tabMenu(t, x, y) {
     claude && { label: '다시 시작 (이어서)', onClick: () => restartTab(t, continueCommand(t)) },
     claude && { label: '새 대화로 다시 시작', onClick: () => restartTab(t, freshCommand(t)) },
     !claude && { label: '다시 시작', onClick: () => restartTab(t) },
-    { label: '같은 위치에 새 세션', onClick: () => createTab({ hostId: t.hostId, cwd: t.cwd, command: freshCommand(t), program: t.program, tmux: t.tmux ? tmuxNameFor(t.cwd) : null, headroom: t.headroom }) },
+    { label: '같은 위치에 새 세션', onClick: () => createTab({ hostId: t.hostId, cwd: t.cwd, command: freshCommand(t), program: t.program, tmux: t.tmux ? tmuxNameFor(t.cwd) : null, headroom: t.headroom, folder: folderOf(t) }) },
     { label: '빠른 실행에 추가', onClick: () => addFavorite({ name: t.name, hostId: t.hostId, cwd: t.cwd, command: t.command, program: t.program, keep: !!t.tmux, headroom: t.headroom }) },
     { label: '파일 패널', sc: 'Ctrl+Shift+E', onClick: () => { setActive(t.id); state.filePanel.open = true; renderFilePanel(); } },
+    '-',
+    ...state.folders.filter((f) => f.id !== folderOf(t)).map((f) => ({ label: `📁 ${f.name}(으)로 이동`, onClick: () => moveTab(t, f.id) })),
+    { label: '📁 새 폴더로 이동…', onClick: () => newFolder(t) },
+    folderOf(t) && { label: '폴더에서 빼기', onClick: () => moveTab(t, null) },
     '-',
     { label: '세션 닫기', sc: 'Ctrl+Shift+W', danger: true, onClick: () => closeTab(t) },
   ]);
@@ -1209,6 +1445,34 @@ $('#btn-restart').addEventListener('click', () => {
     ]);
   } else restartTab(tab);
 });
+
+// ── sidebar width: drag its right edge, double-click the edge to reset
+const SIDEBAR_W = 248;
+function setSidebarWidth(w, save = false) {
+  w = Math.round(Math.max(180, Math.min(560, innerWidth - 360, w)));
+  $('#sidebar').style.width = w + 'px';
+  if (save) {
+    state.settings.sidebarWidth = w;
+    deck.setConfig({ settings: state.settings });
+  }
+}
+const grip = $('#sidebar-grip');
+grip.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const startX = e.clientX;
+  const startW = $('#sidebar').offsetWidth;
+  grip.setPointerCapture(e.pointerId);
+  grip.classList.add('dragging');
+  const move = (ev) => setSidebarWidth(startW + ev.clientX - startX);
+  grip.addEventListener('pointermove', move);
+  grip.addEventListener('lostpointercapture', () => {
+    grip.removeEventListener('pointermove', move);
+    grip.classList.remove('dragging');
+    setSidebarWidth($('#sidebar').offsetWidth, true);
+  }, { once: true });
+});
+grip.addEventListener('dblclick', () => setSidebarWidth(SIDEBAR_W, true));
 
 // ───────────────────────── file panel ─────────────────────────
 const VIEWABLE = /\.(md|markdown|html?|pdf|png|jpe?g|gif|webp|svg|csv|txt|json|docx|xlsx|pptx|hwpx?|mp4|webm)$/i;
@@ -1803,7 +2067,7 @@ async function newSessionModal(preset = {}) {
     if (HEADROOM_TOOLS.has(program)) state.lastHeadroom = headChk.checked;
     state.lastHostId = hostId;
     m.close();
-    const tab = createTab({ hostId, cwd, command, program, name, tmux, headroom });
+    const tab = createTab({ hostId, cwd, command, program, name, tmux, headroom, folder: preset.folder });
     if (favChk.checked) addFavorite({ name: tab.name, hostId, cwd, command, program, keep: !!tmux, headroom });
   };
 
@@ -2057,6 +2321,7 @@ function settingsModal() {
 
 $('#btn-new').addEventListener('click', () => newSessionModal());
 $('#btn-new-empty').addEventListener('click', () => newSessionModal());
+$('#btn-folder').addEventListener('click', () => newFolder());
 $('#btn-hosts').addEventListener('click', hostsModal);
 $('#btn-settings').addEventListener('click', settingsModal);
 
@@ -2113,6 +2378,8 @@ function updateModal(r) {
   if (!state.settings.programs?.length) state.settings.programs = ['claude'];
   state.favorites = cfg.favorites || [];
   state.recentPaths = cfg.recentPaths || {};
+  state.folders = cfg.folders || [];
+  setSidebarWidth(state.settings.sidebarWidth || SIDEBAR_W);
   for (const t of cfg.tabs || []) createTab({ ...t, paused: true }, { activate: false });
   const first = tabById(cfg.activeTab) || state.tabs[0];
   if (first) setActive(first.id);

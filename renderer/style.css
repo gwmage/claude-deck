@@ -48,8 +48,10 @@ kbd {
 }
 .brand { display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; font-weight: 700; font-size: 14px; letter-spacing: -0.01em; }
 .logo { color: var(--accent); font-size: 18px; }
+.new-row { display: flex; gap: 6px; margin: 4px 12px 10px; }
 .btn-new {
-  margin: 4px 12px 10px;
+  flex: 1;
+  min-width: 0;
   padding: 8px 10px;
   border-radius: var(--radius);
   border: 1px solid #d9775766;
@@ -60,6 +62,13 @@ kbd {
 }
 .btn-new:hover { background: #d977573a; }
 .btn-new kbd { color: #d9a08b; background: transparent; border-color: #d9775744; }
+.btn-folder { flex: none; width: 36px; border-radius: var(--radius); border: 1px solid var(--line); background: none; color: var(--muted); }
+.btn-folder:hover { background: #ffffff0a; color: var(--text); }
+
+#sidebar-grip { flex: none; width: 7px; margin: 0 -4px 0 -3px; position: relative; z-index: 6; cursor: col-resize; }
+#sidebar-grip::after { content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px; background: transparent; transition: background 0.12s; }
+#sidebar-grip:hover::after, #sidebar-grip.dragging::after { background: var(--accent); }
+#sidebar-grip.dragging { cursor: col-resize; }
 
 #tabs { flex: 1; overflow-y: auto; padding: 2px 8px 8px; min-height: 60px; }
 .group-title {
@@ -70,6 +79,19 @@ kbd {
 .group-title .gname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-add { border: 0; background: none; color: var(--dim); padding: 0 4px; font-size: 14px; line-height: 1; border-radius: 4px; }
 .group-add:hover { color: var(--text); background: #ffffff10; }
+
+.group-title.folder { cursor: pointer; color: var(--muted); border-radius: 6px; margin-top: 4px; padding: 6px 8px 4px; text-transform: none; font-size: 12px; letter-spacing: 0; user-select: none; }
+.group-title.folder:hover { background: #ffffff06; color: var(--text); }
+.group-title .caret { width: 10px; font-size: 10px; color: var(--dim); }
+.group-title .gcount { font-size: 10.5px; color: var(--dim); font-weight: 500; }
+.folder-tabs { padding-left: 10px; margin-left: 12px; border-left: 1px solid var(--line); min-height: 4px; }
+.folder-empty { font-size: 11px; color: var(--dim); padding: 4px 8px 6px; }
+.host-tag { color: var(--dim); }
+
+.tab.dragging, .group-title.dragging { opacity: 0.4; }
+.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.drop-into { background: var(--accent-soft) !important; box-shadow: inset 0 0 0 1px #d9775788; }
 
 .tab {
   position: relative;

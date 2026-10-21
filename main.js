@@ -24,6 +24,7 @@ const DEFAULT_CONFIG = {
   favorites: [],
   recentPaths: {},
   tabs: [],
+  folders: [],
   activeTab: null,
   knownHosts: {},
   settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false },
@@ -41,6 +42,7 @@ function loadConfig() {
       // first run of a secondary instance: take servers, favorites, programs and trusted keys, not tabs
       const seed = JSON.parse(fs.readFileSync(SEED_CONFIG, 'utf8'));
       delete seed.tabs;
+      delete seed.folders;
       delete seed.activeTab;
       raw = JSON.stringify(seed);
     }
@@ -874,10 +876,11 @@ ipcMain.handle('config:get', () => ({
   favorites: config.favorites,
   recentPaths: config.recentPaths,
   tabs: config.tabs,
+  folders: config.folders,
   activeTab: config.activeTab,
 }));
 ipcMain.handle('config:set', (_e, patch) => {
-  for (const k of ['settings', 'favorites', 'tabs', 'activeTab']) if (k in patch) config[k] = patch[k];
+  for (const k of ['settings', 'favorites', 'tabs', 'folders', 'activeTab']) if (k in patch) config[k] = patch[k];
   saveConfig();
 });
 
