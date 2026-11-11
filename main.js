@@ -27,7 +27,7 @@ const DEFAULT_CONFIG = {
   folders: [],
   activeTab: null,
   knownHosts: {},
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false, hideDiffSidebar: true },
 };
 let config = structuredClone(DEFAULT_CONFIG);
 const configPath = () => path.join(app.getPath('userData'), 'config.json');
@@ -623,6 +623,41 @@ const hookSettings = (sessionsDir, tabId) =>
     },
   });
 
+// Claude Code diff sidebar: 파일을 고칠 때 터미널 오른쪽에 자동으로 뜨는 "파일 변경" 패널.
+// settings.json(--settings)이나 환경변수로는 끌 수 없고 ~/.claude.json의 "diffSidebarOpen"이 유일한 스위치다.
+// 세션을 띄우기 직전마다 이 키를 맞춰 둔다(이미 원하는 값이면 쓰기를 건너뛴다).
+function applyDiffSidebarPref(cfg, hide) {
+  if (hide) {
+    if (cfg.diffSidebarOpen === false) return false;
+    cfg.diffSidebarOpen = false;
+  } else if ('diffSidebarOpen' in cfg) {
+    delete cfg.diffSidebarOpen; // Claude 기본 동작(패널을 스스로 켜고 끔)으로 되돌린다
+  } else return false;
+  return true;
+}
+
+function enforceLocalDiffSidebar() {
+  const file = path.join(HOME, '.claude.json');
+  let cfg = {};
+  try {
+    cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {} // 아직 없는 경우: 키만 넣어 새로 만든다
+  if (!applyDiffSidebarPref(cfg, config.settings.hideDiffSidebar)) return;
+  try {
+    fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+  } catch {}
+}
+
+async function enforceRemoteDiffSidebar(sftp, home) {
+  const file = `${home}/.claude.json`;
+  let cfg = {};
+  try {
+    cfg = JSON.parse(String(await sftpCall(sftp, 'readFile', file)));
+  } catch {}
+  if (!applyDiffSidebarPref(cfg, config.settings.hideDiffSidebar)) return;
+  await sftpCall(sftp, 'writeFile', file, JSON.stringify(cfg, null, 2));
+}
+
 async function prepareTracking(hostId, tabId) {
   if (!TAB_ID_RE.test(tabId)) throw new Error(`잘못된 탭 ID: ${tabId}`);
   let info = null;
@@ -631,6 +666,7 @@ async function prepareTracking(hostId, tabId) {
     const settings = path.join(base, `${tabId}.settings.json`);
     fs.mkdirSync(base, { recursive: true });
     fs.writeFileSync(settings, hookSettings(base.replace(/\\/g, '/') + '/sessions', tabId));
+    enforceLocalDiffSidebar();
     try {
       info = JSON.parse(fs.readFileSync(path.join(base, 'sessions', `${tabId}.json`), 'utf8'));
       if (info.transcript_path && !fs.existsSync(info.transcript_path)) info = null; // never got a message: nothing to resume
@@ -638,10 +674,12 @@ async function prepareTracking(hostId, tabId) {
     return { settingsArg: `"${settings}"`, sessionId: info?.session_id || null };
   }
   const sftp = await getSftp(hostId);
-  const base = `${await remoteHome(hostId)}/.claude-deck/claude-sessions`;
+  const home = await remoteHome(hostId);
+  const base = `${home}/.claude-deck/claude-sessions`;
   const settings = `${base}/${tabId}.settings.json`;
   await sftpMkdirp(sftp, base);
   await sftpCall(sftp, 'writeFile', settings, hookSettings(`${base}/sessions`, tabId));
+  await enforceRemoteDiffSidebar(sftp, home).catch(() => {}); // 실패해도 세션 시작은 막지 않는다
   try {
     info = JSON.parse(String(await sftpCall(sftp, 'readFile', `${base}/sessions/${tabId}.json`)));
     if (info.transcript_path) await sftpCall(sftp, 'stat', info.transcript_path);
@@ -1086,6 +1124,7 @@ if (!app.requestSingleInstanceLock()) {
     app.setAppUserModelId('com.inspirio.claude-deck');
     Menu.setApplicationMenu(null);
     loadConfig();
+    enforceLocalDiffSidebar();
     createWindow();
   });
   app.on('window-all-closed', () => {

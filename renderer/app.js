@@ -35,7 +35,7 @@ const state = {
   tabs: [],
   folders: [],
   activeId: null,
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false, hideDiffSidebar: true },
   favorites: [],
   recentPaths: {},
   filePanel: { open: false, mode: 'recent' },
@@ -2292,6 +2292,7 @@ function settingsModal() {
   const notify = h('input', { type: 'checkbox', checked: s.notify });
   const copySel = h('input', { type: 'checkbox', checked: s.copyOnSelect });
   const appMouse = h('input', { type: 'checkbox', checked: s.appMouse });
+  const diffOff = h('input', { type: 'checkbox', checked: s.hideDiffSidebar !== false });
   const m = openModal({
     title: '설정',
     body: h('div', {},
@@ -2301,6 +2302,8 @@ function settingsModal() {
         h('div', { class: 'hint' }, '한 줄에 하나씩 적습니다. 새 세션 창과 탭 메뉴의 "실행 프로그램 변경"에 나옵니다. 예: claude, claude-glm')),
       h('label', { class: 'check' }, copySel, '마우스로 선택하면 바로 복사 (Ctrl+C 없이)'),
       h('label', { class: 'check' }, appMouse, '터미널 앱에 마우스 넘기기 (Claude 클릭·휠을 쓰는 대신, 드래그 선택은 Shift 필요)'),
+      h('label', { class: 'check' }, diffOff, 'Claude가 고친 파일(diff 패널)을 터미널 오른쪽에 자동으로 띄우지 않기'),
+      h('div', { class: 'hint' }, '세션을 새로 열 때마다 ~/.claude.json(원격은 해당 서버의)에 적용됩니다. 끈 뒤에도 그 세션에서 /diff로 수동 열람은 가능합니다.'),
       h('label', { class: 'check' }, notify, '창이 백그라운드일 때 Claude 응답 완료를 Windows 알림으로 받기')),
     actions: [
       { label: '취소', onClick: () => m.close() },
@@ -2309,7 +2312,7 @@ function settingsModal() {
         primary: true,
         onClick: () => {
           const list = progs.value.split('\n').map((x) => x.trim()).filter(Boolean);
-          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, copyOnSelect: copySel.checked, appMouse: appMouse.checked, programs: list.length ? list : ['claude'] };
+          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, copyOnSelect: copySel.checked, appMouse: appMouse.checked, hideDiffSidebar: diffOff.checked, programs: list.length ? list : ['claude'] };
           if (!appMouse.checked) for (const t of state.tabs) t.term.write(MOUSE_OFF); // release a mouse grab already in effect
           setFontSize(parseInt(font.value, 10) || 14);
           m.close();
