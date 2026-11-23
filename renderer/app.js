@@ -787,9 +787,19 @@ function copyFromTab(tab) {
 
 // Everything the clipboard can hand us: text, an image, or file paths.
 let awaitingPaste = false;
+let emptyClipToast = null;
+// One toast at a time, however often paste is pressed (key repeat on Ctrl+V).
+function toastEmptyClipboard() {
+  emptyClipToast?.close();
+  emptyClipToast = toast('붙여넣을 내용이 없습니다');
+}
 async function handleClipboardData(tab, dt) {
+  // A paste event that pasteInto() asked the main process for. If it carries nothing either, the
+  // clipboard is empty: stop here, since going back to pasteInto() would request another paste
+  // event and loop forever.
+  const fromMain = awaitingPaste;
   awaitingPaste = false;
-  if (!dt) return pasteInto(tab);
+  if (!dt) return fromMain ? toastEmptyClipboard() : pasteInto(tab);
   const text = dt.getData('text/plain');
   if (text) {
     if (tab.status === 'running') {
@@ -807,7 +817,7 @@ async function handleClipboardData(tab, dt) {
   }
   const paths = [...(dt.files || [])].map((f) => deck.pathForFile(f)).filter(Boolean);
   if (paths.length) return pastePaths(tab, paths);
-  return pasteInto(tab);
+  return fromMain ? toastEmptyClipboard() : pasteInto(tab);
 }
 
 async function pasteImageFile(tab, file) {
@@ -856,7 +866,7 @@ async function pasteInto(tab) {
   setTimeout(() => {
     if (!awaitingPaste) return;
     awaitingPaste = false;
-    toast('붙여넣을 내용이 없습니다');
+    toastEmptyClipboard();
   }, 600);
 }
 
