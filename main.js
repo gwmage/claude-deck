@@ -27,7 +27,7 @@ const DEFAULT_CONFIG = {
   folders: [],
   activeTab: null,
   knownHosts: {},
-  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false, hideDiffSidebar: true },
+  settings: { fontSize: 14, localShell: 'auto', notify: true, programs: ['claude'], copyOnSelect: true, appMouse: false, hideDiffSidebar: true, autoResume: false },
 };
 let config = structuredClone(DEFAULT_CONFIG);
 const configPath = () => path.join(app.getPath('userData'), 'config.json');

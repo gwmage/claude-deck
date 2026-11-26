@@ -377,6 +377,25 @@ function reconnectTab(tab) {
   restartTab(tab, continueCommand(tab), { keepServerSession: true });
 }
 
+// what the primary overlay button does: reattach a kept session, continue an agent's conversation, or rerun the command
+function resumeTab(tab) {
+  if (tab.tmux) return reconnectTab(tab);
+  if (isAgent(tab)) return restartTab(tab, continueCommand(tab));
+  return restartTab(tab);
+}
+
+// tabs left over from the last run (after a reboot or app restart): start them all, a little apart so
+// SSH logins and Claude launches don't all hit at once; the active tab goes first
+const pausedTabs = () => state.tabs.filter((t) => t.status === 'paused');
+async function resumeAllTabs() {
+  const list = pausedTabs().sort((a, b) => (b.id === state.activeId) - (a.id === state.activeId));
+  for (const t of list) {
+    if (t.status !== 'paused' || !state.tabs.includes(t)) continue;
+    resumeTab(t);
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
 async function closeTab(tab, { confirm = true } = {}) {
   const alive = tab.status === 'running' || tab.status === 'connecting';
   let killServer = false;
@@ -454,6 +473,9 @@ function showOverlay(tab) {
     btns.push(h('button', { class: 'btn', onclick: () => restartTab(tab, freshCommand(tab)) }, '새 대화로 시작'));
   } else {
     btns.push(h('button', { class: 'primary', onclick: () => restartTab(tab) }, '다시 시작'));
+  }
+  if (tab.status === 'paused' && pausedTabs().length > 1) {
+    btns.push(h('button', { class: 'btn', title: '이전에 열려 있던 세션을 한꺼번에 다시 엽니다', onclick: () => resumeAllTabs() }, '모두 이어서 시작'));
   }
   btns.push(h('button', { class: 'btn', onclick: () => closeTab(tab, { confirm: false }) }, '탭 닫기'));
   tab.overlay = h('div', { class: 'overlay' }, h('div', { class: 'overlay-msg', html: msg }), h('div', { class: 'btns' }, btns));
@@ -2303,6 +2325,7 @@ function settingsModal() {
   const copySel = h('input', { type: 'checkbox', checked: s.copyOnSelect });
   const appMouse = h('input', { type: 'checkbox', checked: s.appMouse });
   const diffOff = h('input', { type: 'checkbox', checked: s.hideDiffSidebar !== false });
+  const autoResume = h('input', { type: 'checkbox', checked: !!s.autoResume });
   const m = openModal({
     title: '설정',
     body: h('div', {},
@@ -2314,6 +2337,7 @@ function settingsModal() {
       h('label', { class: 'check' }, appMouse, '터미널 앱에 마우스 넘기기 (Claude 클릭·휠을 쓰는 대신, 드래그 선택은 Shift 필요)'),
       h('label', { class: 'check' }, diffOff, 'Claude가 고친 파일(diff 패널)을 터미널 오른쪽에 자동으로 띄우지 않기'),
       h('div', { class: 'hint' }, '세션을 새로 열 때마다 ~/.claude.json(원격은 해당 서버의)에 적용됩니다. 끈 뒤에도 그 세션에서 /diff로 수동 열람은 가능합니다.'),
+      h('label', { class: 'check' }, autoResume, '앱을 켤 때 이전에 열려 있던 세션을 모두 자동으로 이어서 시작'),
       h('label', { class: 'check' }, notify, '창이 백그라운드일 때 Claude 응답 완료를 Windows 알림으로 받기')),
     actions: [
       { label: '취소', onClick: () => m.close() },
@@ -2322,7 +2346,7 @@ function settingsModal() {
         primary: true,
         onClick: () => {
           const list = progs.value.split('\n').map((x) => x.trim()).filter(Boolean);
-          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, copyOnSelect: copySel.checked, appMouse: appMouse.checked, hideDiffSidebar: diffOff.checked, programs: list.length ? list : ['claude'] };
+          state.settings = { ...s, localShell: shellSel.value, notify: notify.checked, copyOnSelect: copySel.checked, appMouse: appMouse.checked, hideDiffSidebar: diffOff.checked, autoResume: autoResume.checked, programs: list.length ? list : ['claude'] };
           if (!appMouse.checked) for (const t of state.tabs) t.term.write(MOUSE_OFF); // release a mouse grab already in effect
           setFontSize(parseInt(font.value, 10) || 14);
           m.close();
@@ -2399,5 +2423,21 @@ function updateModal(r) {
   renderTabs();
   renderFavorites();
   updateTopbar();
+  offerResumeAll();
   setTimeout(checkUpdate, 3000);
 })();
+
+function offerResumeAll() {
+  const n = pausedTabs().length;
+  if (!n) return;
+  for (const t of pausedTabs()) showOverlay(t); // overlays were built while tabs were still being added
+  if (state.settings.autoResume) return void resumeAllTabs();
+  if (n < 2) return;
+  const t = toast(`이전에 열려 있던 세션 ${n}개`, {
+    sticky: true,
+    actions: [
+      { label: '닫기', onClick: () => t.close() },
+      { label: '모두 이어서 시작', primary: true, onClick: () => (t.close(), resumeAllTabs()) },
+    ],
+  });
+}
